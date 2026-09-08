@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digital-twin-capstone"
+version = "1.0.0"
+description = "Live nvblox and Isaac digital twin for the UCF RASSOR rover."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24,<2",
+  "Pillow>=9",
+  "scipy>=1.10,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9"]
+
+[project.scripts]
+dt-dashboard = "digital_twin.dashboard:main"
+dt-drive = "digital_twin.drive:main"
+dt-mapper = "digital_twin.mapper:main"
+dt-scan = "digital_twin.scan:main"
+dt-validator = "digital_twin.isaac_service:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:anyio"

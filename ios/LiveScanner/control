@@ -1,0 +1,7 @@
+Package: com.example.livescanner
+Name: LiveScanner
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Streams iPhone LiDAR scene-reconstruction mesh anchors to the digital twin host.
+Author: DigitalTwin
+Section: Applications

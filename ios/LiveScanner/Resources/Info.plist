@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>LiveScanner</string>
+	<key>CFBundleExecutable</key>
+	<string>LiveScanner</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.livescanner</string>
+	<key>CFBundleName</key>
+	<string>LiveScanner</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>14.0</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
+	<!-- ARKit is a public framework and needs no special entitlement; it does
+	     require a device that supports it. Scene reconstruction additionally
+	     needs a LiDAR sensor, which we guard for at runtime. -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>arkit</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>LiveScanner uses the camera and LiDAR to scan the room and stream it to the digital twin.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LiveScanner connects to the Isaac host on the local network to stream room mesh data.</string>
+	<!-- Empty UILaunchScreen dict gives a default full-screen launch on iOS 14+
+	     WITHOUT a storyboard (ibtool is macOS-only and unavailable under Theos
+	     on Linux). Omitting this makes the app launch letterboxed/scaled. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,85 @@
+# Newton-physics variant of isaacsim.exp.base.python.kit, built the same way
+# NVIDIA builds isaacsim.exp.full.newton.kit from isaacsim.exp.full.kit:
+# depend on the base app, enable the Newton engine with auto-switch, and
+# disable the PhysX extension stack so the session runs Newton from launch.
+#
+# run_isaac_validator.sh copies this file into $ISAAC_SIM_ROOT/apps/ (so the
+# ${app} extension-folder tokens resolve against the Isaac install) and passes
+# it to the validator service as --experience.
+
+[package]
+title = "Isaac Sim Python (Newton Physics)"
+description = "Trimmed python app with the Newton Physics Engine"
+version = "6.0.0"
+keywords = ["experience", "app", "usd", "isaacsim", "newton"]
+
+[dependencies]
+"isaacsim.exp.base.python" = {}
+
+# Newton Physics Engine
+"isaacsim.physics.newton" = {}
+"isaacsim.physics.newton.tensors" = {}
+
+# Warp extensions for Newton
+"omni.warp.core" = {}
+
+# Disable PhysX extensions (use Newton instead)
+"omni.physics.stageupdate" = { enabled = false }
+"omni.physics.physx" = { enabled = false }
+"omni.physx.bundle" = { enabled = false }
+"omni.physx.fabric" = { enabled = false }
+"omni.physx.graph" = { enabled = false }
+"omni.physx.camera" = { enabled = false }
+"omni.physx.pvd" = { enabled = false }
+"omni.physx.vehicle" = { enabled = false }
+"isaacsim.sensors.physx" = { enabled = false }
+"isaacsim.sensors.experimental.physics" = { enabled = false }
+"isaacsim.sensors.physics.nodes" = { enabled = false }
+
+[settings]
+# Newton simulation specific settings
+exts."isaacsim.physics.newton".auto_switch_on_startup = true
+exts."isaacsim.physics.newton".capture_graph_physics_step = true
+
+# Disable PhysX at settings level
+[settings.exts."omni.physx"]
+enabled = false
+
+[settings.exts."omni.physics.physx"]
+enabled = false
+
+[settings.exts."isaacsim.sensors.physx"]
+enabled = false
+
+[settings.exts."omni.usdphysics"]
+enabled = false
+
+# PhysX fabric/USD sync settings (all disabled for Newton)
+updateToUsd = false
+updateVelocitiesToUsd = false
+updateParticlesToUsd = false
+updateForceSensorsToUsd = false
+outputVelocitiesLocalSpace = false
+useFastCache = false
+visualizationDisplayJoints = false
+fabricUpdateTransformations = false
+fabricUpdateVelocities = false
+fabricUpdateForceSensors = false
+fabricUpdateJointStates = false
+
+[settings.app]
+name = "Isaac-Sim Python (Newton)"
+version = "6.0.0"
+settings.persistent = false        # settings reset on each run with this app
+window.title = "Isaac Sim Python (Newton Physics)"
+vulkan = true                      # Explicitly enable Vulkan
+enableDeveloperWarnings = false    # disable developer warnings to reduce log noise
+
+[settings.app.exts.folders]
+'++' = [
+    "${app}",
+    "${app}/../exts",
+    "${app}/../extscache",
+    "${app}/../extsUser",
+    "${app}/../extsDeprecated",
+]
