@@ -3,14 +3,13 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>RASSOR Live Twin</title>
-<!-- ?v= busts already-cached copies from before the server sent no-cache; bump on breaking HTML/JS/CSS contract changes -->
-<link rel="stylesheet" href="style.css?v=3" />
+<title>RASSOR Twin</title>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <header>
   <div class="brand">
-    <h1>RASSOR Live Twin</h1>
+    <h1>RASSOR Twin</h1>
     <span class="subtitle">operator console</span>
   </div>
   <div id="header-status" class="pill-row"></div>
@@ -21,103 +20,77 @@
     <div class="connection-grid">
       <label class="field">
         <span>Rover IP</span>
-        <input id="rover-ip" type="text" value="192.168.0.157" autocomplete="off" />
+        <input id="rover-ip" type="text" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Speed level</span>
+        <select id="level">
+          <option value="1">1 (60 RPM, ~0.035 m/s)</option>
+          <option value="2">2 (100 RPM)</option>
+          <option value="3">3 (140 RPM)</option>
+        </select>
       </label>
       <label class="arm-switch" for="arm-toggle">
         <input id="arm-toggle" type="checkbox" />
         <span class="track"><span class="thumb"></span></span>
-        <span class="arm-label" id="arm-label">Rehearsal mode &mdash; nothing is sent to the rover</span>
+        <span class="arm-label" id="arm-label">Rehearsal mode: nothing is sent to the rover</span>
       </label>
     </div>
   </section>
 
-  <section class="card" id="live-view">
-    <div class="section-head">
-      <h2>Live View</h2>
-      <div class="button-row">
-        <button id="tracking-start" title="Resume the phone scan with map integration paused: the twin follows the rover live without rewriting the map">Resume tracking</button>
-        <button id="tracking-stop" title="Stop the phone scan; the twin's pose freezes until tracking is resumed">Pause tracking</button>
-      </div>
+  <section class="card" id="map-view">
+    <h2>Map</h2>
+    <div class="map-frame">
+      <canvas id="map"></canvas>
+      <div class="map-empty" id="map-empty">No map yet: start the twin and connect the phone</div>
     </div>
-    <div class="feeds-grid">
-      <figure class="feed" id="phone-feed">
-        <div class="feed-frame">
-          <img id="phone-frame" alt="" />
-          <div class="feed-empty">Waiting for phone frames &mdash; connect the app and start a scan</div>
-        </div>
-        <figcaption>
-          <span id="phone-feed-label">iPhone camera</span>
-          <span id="phone-frame-age" class="frame-age">no frame yet</span>
-        </figcaption>
-      </figure>
-      <figure class="feed" id="chase-feed">
-        <div class="feed-frame">
-          <img id="chase-frame" alt="" />
-          <div class="feed-empty">Sim chase camera &mdash; appears once the live twin is running</div>
-        </div>
-        <figcaption>
-          <span>Sim chase camera</span>
-          <span id="chase-frame-age" class="frame-age"></span>
-        </figcaption>
-      </figure>
+    <div class="legend">
+      <span><i class="swatch floor"></i>floor (darker is lower)</span>
+      <span><i class="swatch obstacle"></i>obstacle or drop</span>
+      <span><i class="swatch inferred"></i>under the rover, inferred</span>
+      <span><i class="swatch unknown"></i>not seen</span>
+      <span><i class="swatch rover"></i>rover (live pose)</span>
     </div>
     <div class="stats-row" id="stats-row"></div>
   </section>
 
   <section class="card" id="twin-control">
-    <h2>Live Twin</h2>
+    <h2>Twin</h2>
     <div class="button-row">
-      <button id="twin-start" class="primary">Launch live twin</button>
+      <button id="twin-start" class="primary">Start mapper and twin</button>
       <button id="twin-stop" class="danger">Stop</button>
     </div>
-    <pre id="twin-log" class="log" aria-label="live twin log"></pre>
+    <p class="hint">Runs scripts/rover_twin.sh. Connect the phone app to this workstation on port 9099.</p>
+    <pre id="twin-log" class="log" aria-label="twin log"></pre>
   </section>
 
-  <section class="card" id="scan-control">
-    <h2>360&deg; Setup Scan</h2>
+  <section class="card" id="motion-control">
+    <h2>Move the rover</h2>
     <div class="form-row">
+      <button id="scan-start" class="primary">360&deg; scan</button>
       <label class="field">
-        <span>Degrees</span>
-        <input id="scan-degrees" type="number" value="360" step="10" />
+        <span>Command</span>
+        <select id="drive-command">
+          <option value="FWD">forward (m)</option>
+          <option value="REV">reverse (m)</option>
+          <option value="LEFT">turn left (deg)</option>
+          <option value="RIGHT">turn right (deg)</option>
+        </select>
       </label>
-      <div class="button-row grow">
-        <button id="scan-start" class="primary">Start 360</button>
-        <button id="scan-stop" class="danger">Stop</button>
-      </div>
-    </div>
-    <p class="hint">Requires the live twin. Armed turns stop automatically from live odometry.</p>
-    <pre id="scan-log" class="log" aria-label="360 scan log"></pre>
-  </section>
-
-  <section class="card" id="goal-control">
-    <h2>Validated Drive</h2>
-    <div class="form-row">
       <label class="field">
-        <span>Distance ahead (m)</span>
-        <input id="goal-distance" type="number" value="1.0" step="0.25" min="0.25" max="3" />
+        <span>Amount</span>
+        <input id="drive-amount" type="number" value="0.5" step="0.1" min="0" />
       </label>
-      <div class="button-row grow">
-        <button id="goal-start" class="primary">Validate &amp; drive</button>
-        <button id="goal-stop" class="danger">Stop</button>
-      </div>
+      <button id="drive-start" class="primary">Rehearse &amp; drive</button>
+      <button id="motion-stop" class="danger">STOP</button>
     </div>
-    <p class="hint">Every command is rehearsed in the twin first; only approved commands reach the rover (armed) or are printed (rehearsal). Resumes tracking automatically.</p>
-    <pre id="goal-log" class="log" aria-label="validated drive log"></pre>
-  </section>
-
-  <section class="card" id="params-control">
-    <h2>Parameters</h2>
-    <p class="hint">Saved on launch; applied as env vars the next time the live twin starts.</p>
-    <form id="params-form" class="params-form"></form>
-    <div class="button-row">
-      <button id="params-save" class="primary">Save</button>
-      <button id="params-reset">Restore defaults</button>
-    </div>
+    <p class="hint">Each command is rehearsed on the live map before it runs, and stopped on the live pose. Disarmed, it is only rehearsed. The scan is four 90&deg; turns.</p>
+    <pre id="motion-log" class="log" aria-label="drive log"></pre>
   </section>
 </main>
 
 <div id="toasts"></div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js"></script>
 </body>
 </html>

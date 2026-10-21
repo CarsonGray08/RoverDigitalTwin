@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    doc = """The v2 twin stage: the v1 rover asset with the lab scan baked into it
+    (a payload that is not in this repo) and v1's SupportGround scaffold
+    switched off. Live elevation tiles from the mapper are the only terrain."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+    subLayers = [@./rover.usd@]
+)
+
+over "Environment"
+{
+    over "__5_2027" (
+        active = false
+        delete payload = @../Downloads/6_5_2026.usd@
+    )
+    {
+    }
+
+    over "CollisionProxy" (active = false)
+    {
+    }
+}
+
+over "World"
+{
+    over "SupportGround" (active = false)
+    {
+    }
+}

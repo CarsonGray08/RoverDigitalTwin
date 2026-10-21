@@ -1,33 +1,28 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const STORE = { "rover-ip": "rt_rover_ip", "level": "rt_level", "drive-command": "rt_command", "drive-amount": "rt_amount" };
+const MAP_REFRESH_MS = 2000;          // at most this often, and only when the map changed
+const POSE_STALE_S = 1.0;             // the drive tool's own limit
 
-// Persisted UI settings (deliberately NOT the arm switch: every page load
-// starts disarmed so a stale tab can never silently drive the real rover).
-const STORE_KEYS = { "rover-ip": "dt_rover_ip", "scan-degrees": "dt_degrees", "goal-distance": "dt_goal_distance" };
-
-let paramSpec = null;
-let lastStatus = null;
+let rover = null;                     // /health's rover: footprint and units
+let grid = null;                      // the last /map, drawn into an offscreen canvas
+let mapVersion = null, mapFetchedAt = 0, mapLoading = false;
+let status = null;
 
 /* ---------- helpers ---------- */
 
 async function api(path, options) {
   const response = await fetch(path, options);
   let body = null;
-  try { body = await response.json(); } catch (_) { /* non-JSON body */ }
-  if (!response.ok) {
-    throw new Error((body && body.error) ? body.error : `HTTP ${response.status}`);
-  }
+  try { body = await response.json(); } catch (_) { /* not JSON */ }
+  if (!response.ok) throw new Error(body && body.error ? body.error : `HTTP ${response.status}`);
   return body;
 }
 
-function postJson(path, payload) {
-  return api(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-}
+const post = (path, payload) => api(path, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload || {}),
+});
 
 function toast(message, kind = "info", ms = 4000) {
   const el = document.createElement("div");
@@ -39,12 +34,10 @@ function toast(message, kind = "info", ms = 4000) {
 
 async function withButton(button, fn) {
   button.disabled = true;
-  try { await fn(); } finally { button.disabled = false; }
+  try { await fn(); } catch (err) { toast(err.message, "err"); } finally { button.disabled = false; }
 }
 
-function fmtNum(value, digits = 2) {
-  return (typeof value === "number" && isFinite(value)) ? value.toFixed(digits) : "--";
-}
+const fmt = (v, digits = 2) => (typeof v === "number" && isFinite(v)) ? v.toFixed(digits) : "--";
 
 function setLog(el, lines) {
   const text = (lines || []).join("\n");
@@ -54,318 +47,164 @@ function setLog(el, lines) {
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
-function showFrame(imgId, blobUrl) {
-  const img = $(imgId);
-  const prev = img.dataset.blobUrl;
-  img.src = blobUrl;
-  img.dataset.blobUrl = blobUrl;
-  img.closest(".feed-frame").classList.add("has-frame");
-  if (prev) URL.revokeObjectURL(prev);
+const armed = () => $("arm-toggle").checked;
+const motionBody = (extra) => ({ arm: armed(), rover_ip: $("rover-ip").value.trim(), level: Number($("level").value), ...extra });
+
+/* ---------- map ---------- */
+
+// Drawn as seen from above with the start heading up: twin +x is up, +y is left.
+function toPixel(x, y) {
+  return [grid.ny - 1 - (y - grid.oy) / grid.cell, grid.nx - 1 - (x - grid.ox) / grid.cell];
 }
 
-function roverConfig() {
-  return { rover_ip: $("rover-ip").value.trim(), arm: $("arm-toggle").checked };
-}
-
-/* ---------- status poll ---------- */
-
-function pill(label, cls) {
-  return `<span class="pill ${cls}"><span class="dot"></span>${label}</span>`;
-}
-
-function renderHeader(status) {
-  const twin = status.jobs.twin;
-  const scan = status.jobs.scan360;
-  const goal = status.jobs.drive_goal;
-  const parts = [
-    twin.running ? pill("twin running", "ok") : pill("twin stopped", ""),
-    scan.running ? pill("360 scanning", "ok") : "",
-    goal && goal.running ? pill("validated drive", "ok") : "",
-    status.tracking_normal ? pill("phone tracking", "ok") : pill("no phone tracking", "warn"),
-    $("arm-toggle").checked ? pill("ARMED", "danger") : "",
-  ];
-  $("header-status").innerHTML = parts.filter(Boolean).join("");
-}
-
-function stat(label, value, title) {
-  return `<div class="stat" ${title ? `title="${title}"` : ""}><div class="k">${label}</div><div class="v">${value}</div></div>`;
-}
-
-function renderStats(status) {
-  const pose = status.pose;
-  const poseAge = pose && typeof pose.timestamp_s === "number"
-    ? (status.server_time_s - pose.timestamp_s) : null;
-  const session = status.session_id
-    ? status.session_id.replace(/^(live-|session-)/, "") : "--";
-  $("stats-row").innerHTML = [
-    stat("x (m)", pose ? fmtNum(pose.x) : "--"),
-    stat("y (m)", pose ? fmtNum(pose.y) : "--"),
-    stat("yaw (deg)", pose ? fmtNum(pose.yaw_deg, 1) : "--"),
-    stat("pose age (s)", poseAge !== null ? fmtNum(poseAge, 1) : "--"),
-    stat("tiles", status.tile_count ?? "--"),
-    stat("map rev", status.manifest_rev ?? "--"),
-    stat("session", session, status.map_dir || ""),
-  ].join("");
-}
-
-function renderButtons(status) {
-  $("twin-start").disabled = status.jobs.twin.running;
-  $("twin-stop").disabled = !status.jobs.twin.running;
-  $("scan-start").disabled = status.jobs.scan360.running;
-  $("scan-stop").disabled = !status.jobs.scan360.running;
-  const goal = status.jobs.drive_goal;
-  if (goal) {
-    $("goal-start").disabled = goal.running || status.jobs.scan360.running;
-    $("goal-stop").disabled = !goal.running;
+function buildGrid(m) {
+  // Only the part that has been seen, with a margin.
+  let i0 = Infinity, i1 = -1, j0 = Infinity, j1 = -1;
+  m.state.forEach((row, i) => row.forEach((state, j) => {
+    if (state) { i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
+  }));
+  if (i1 < 0) return null;
+  const pad = 10;
+  i0 = Math.max(0, i0 - pad); j0 = Math.max(0, j0 - pad);
+  i1 = Math.min(m.shape[0] - 1, i1 + pad); j1 = Math.min(m.shape[1] - 1, j1 + pad);
+  const nx = i1 - i0 + 1, ny = j1 - j0 + 1;
+  const canvas = document.createElement("canvas");
+  canvas.width = ny; canvas.height = nx;
+  const ctx = canvas.getContext("2d");
+  const image = ctx.createImageData(ny, nx);
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < ny; j++) {
+      const k = ((nx - 1 - i) * ny + (ny - 1 - j)) * 4;
+      const state = m.state[i0 + i][j0 + j], h = m.height_m[i0 + i][j0 + j];
+      let c = [22, 26, 33];                                   // not seen
+      if (m.obstacle[i0 + i][j0 + j]) c = [255, 93, 93];
+      else if (state === 2) c = [92, 118, 168];
+      else if (state === 1) { const v = Math.max(60, Math.min(210, 150 + h * 900)); c = [v, v, v]; }
+      image.data.set([c[0], c[1], c[2], 255], k);
+    }
   }
+  ctx.putImageData(image, 0, 0);
+  return { canvas, nx, ny, cell: m.cell_m, ox: m.origin_m[0] + i0 * m.cell_m, oy: m.origin_m[1] + j0 * m.cell_m };
 }
 
-async function pollStatus() {
+async function refreshMap(version) {
+  if (mapLoading || (version === mapVersion && grid)) return;
+  if (Date.now() - mapFetchedAt < MAP_REFRESH_MS) return;
+  mapLoading = true;
   try {
-    const status = await api("/api/status");
-    lastStatus = status;
-    renderHeader(status);
-    renderStats(status);
-    renderButtons(status);
-    setLog($("twin-log"), status.jobs.twin.log_tail);
-    setLog($("scan-log"), status.jobs.scan360.log_tail);
-    if (status.jobs.drive_goal) setLog($("goal-log"), status.jobs.drive_goal.log_tail);
+    const m = await api("/api/map");
+    mapFetchedAt = Date.now();
+    if (m.shape[0] > 0) { grid = buildGrid(m) || grid; mapVersion = version; }
+  } catch (_) { /* the twin is down or busy; the next poll tries again */ }
+  finally { mapLoading = false; }
+}
+
+function drawMap(live) {
+  const canvas = $("map");
+  $("map-empty").style.display = grid ? "none" : "flex";
+  if (!grid) return;
+  const scale = Math.min(canvas.parentElement.clientWidth / grid.ny, 0.7 * window.innerHeight / grid.nx);
+  canvas.width = Math.round(grid.ny * scale);
+  canvas.height = Math.round(grid.nx * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(grid.canvas, 0, 0, canvas.width, canvas.height);
+  const at = (x, y) => toPixel(x, y).map((p) => p * scale);
+  const [sx, sy] = at(0, 0);                                  // where the map was anchored
+  ctx.strokeStyle = "#f2b84b"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(sx - 6, sy); ctx.lineTo(sx + 6, sy); ctx.moveTo(sx, sy - 6); ctx.lineTo(sx, sy + 6); ctx.stroke();
+  if (!live || !rover) return;
+  const [hl, hw] = rover.footprint_half_m;
+  const yaw = live.yaw_deg * Math.PI / 180, c = Math.cos(yaw), s = Math.sin(yaw);
+  const corner = (u, v) => at(live.x + c * u - s * v, live.y + s * u + c * v);
+  ctx.strokeStyle = ctx.fillStyle = "#46d17a"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].forEach(([u, v], n) => { const p = corner(u, v); n ? ctx.lineTo(...p) : ctx.moveTo(...p); });
+  ctx.closePath(); ctx.stroke();
+  const [cx, cy] = at(live.x, live.y), [fx, fy] = corner(hl + 0.15, 0);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
+}
+
+/* ---------- status ---------- */
+
+const pill = (label, cls = "") => `<span class="pill ${cls}"><span class="dot"></span>${label}</span>`;
+const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+
+function render(s) {
+  const obs = s.observation, live = obs && obs.live_pose;
+  const fresh = live && live.age_s <= POSE_STALE_S;
+  $("header-status").innerHTML = [
+    s.twin_job.running ? pill("twin running", "ok") : pill(obs ? "twin up" : "twin stopped", obs ? "ok" : ""),
+    obs ? (obs.mapper_connected ? pill("mapper connected", "ok") : pill("no mapper", "warn")) : "",
+    obs ? (fresh ? pill("live pose", "ok") : pill(live ? "pose stale" : "no pose yet", "warn")) : "",
+    s.motion_job.running ? pill(armed() ? "rover moving" : "rehearsing", "ok") : "",
+    armed() ? pill("ARMED", "danger") : "",
+  ].join("");
+  $("stats-row").innerHTML = [
+    stat("x (m)", live ? fmt(live.x) : "--"),
+    stat("y (m)", live ? fmt(live.y) : "--"),
+    stat("yaw (deg)", live ? fmt(live.yaw_deg, 1) : "--"),
+    stat("pose age (s)", live ? fmt(live.age_s, 1) : "--"),
+    stat("map rev", live ? live.rev : "--"),
+    stat("tiles", obs ? obs.terrain_tiles : "--"),
+  ].join("");
+  $("twin-start").disabled = s.twin_job.running;
+  $("twin-stop").disabled = !s.twin_job.running;
+  $("scan-start").disabled = $("drive-start").disabled = s.motion_job.running || !obs;
+  setLog($("twin-log"), s.twin_job.log);
+  setLog($("motion-log"), s.motion_job.log);
+  if (obs) refreshMap(live ? live.rev : obs.terrain_tiles);
+  drawMap(live);
+}
+
+async function poll() {
+  try {
+    status = await api("/api/status");
+    if (status.observation && !rover) rover = (await api("/api/health")).rover;
+    if (!$("rover-ip").value && status.rover_ip) $("rover-ip").value = status.rover_ip;
+    render(status);
   } catch (err) {
     $("header-status").innerHTML = pill(`dashboard unreachable: ${err.message}`, "warn");
   } finally {
-    setTimeout(pollStatus, 2000);
+    setTimeout(poll, 500);
   }
-}
-
-/* ---------- camera feeds ---------- */
-
-async function pollPhoneCamera() {
-  const ageEl = $("phone-frame-age");
-  let delay = 700;
-  try {
-    const response = await fetch("/api/camera", { cache: "no-store" });
-    if (response.ok) {
-      const source = response.headers.get("X-Frame-Source");
-      const stamp = Number(response.headers.get("X-Frame-Timestamp"));
-      $("phone-feed-label").textContent =
-        source === "depth" ? "iPhone camera (depth preview)" : "iPhone camera";
-      if (isFinite(stamp) && stamp > 0) {
-        const age = Date.now() / 1000 - stamp;
-        ageEl.textContent = `${age.toFixed(1)}s old`;
-        ageEl.className = "frame-age " + (age < 3 ? "fresh" : "stale");
-      }
-      showFrame("phone-frame", URL.createObjectURL(await response.blob()));
-    } else {
-      ageEl.textContent = "no frame yet";
-      ageEl.className = "frame-age stale";
-      delay = 2500;
-    }
-  } catch (_) {
-    ageEl.textContent = "offline";
-    ageEl.className = "frame-age stale";
-    delay = 4000;
-  } finally {
-    setTimeout(pollPhoneCamera, delay);
-  }
-}
-
-async function pollChaseCamera() {
-  const ageEl = $("chase-frame-age");
-  let delay = 1500;
-  try {
-    const obs = await api("/api/observation");
-    const frame =
-      (obs.vision_chase && obs.vision_chase.status === "ok" && obs.vision_chase.rgb_base64) ? obs.vision_chase :
-      (obs.vision && obs.vision.status === "ok" && obs.vision.rgb_base64) ? obs.vision : null;
-    if (frame) {
-      const bytes = Uint8Array.from(atob(frame.rgb_base64), (c) => c.charCodeAt(0));
-      showFrame("chase-frame", URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
-      ageEl.textContent = "live";
-      ageEl.className = "frame-age fresh";
-    }
-  } catch (_) {
-    ageEl.textContent = lastStatus && lastStatus.jobs.twin.running ? "waiting" : "";
-    ageEl.className = "frame-age stale";
-    delay = 4000;
-  } finally {
-    setTimeout(pollChaseCamera, delay);
-  }
-}
-
-/* ---------- parameters ---------- */
-
-function paramGroups(spec) {
-  const groups = new Map();
-  for (const [name, def] of Object.entries(spec)) {
-    const group = def.group || "Other";
-    if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push([name, def]);
-  }
-  return groups;
-}
-
-function renderParamsForm(spec, values) {
-  const form = $("params-form");
-  form.innerHTML = "";
-  for (const [group, entries] of paramGroups(spec)) {
-    const section = document.createElement("div");
-    section.className = "param-group";
-    section.innerHTML = `<h3>${group}</h3><div class="fields"></div>`;
-    const fields = section.querySelector(".fields");
-    for (const [name, def] of entries) {
-      const value = values[name];
-      const label = document.createElement("label");
-      const title = def.help ? ` title="${def.help.replace(/"/g, "&quot;")}"` : "";
-      const text = def.label || name;
-      if (def.type === "bool") {
-        label.className = "checkbox";
-        label.innerHTML = `<input type="checkbox" data-param="${name}" ${value ? "checked" : ""}${title}/> ${text}`;
-      } else if (def.type === "choice") {
-        const options = def.choices.map((choice) =>
-          `<option value="${choice}" ${String(choice) === String(value) ? "selected" : ""}>${choice}</option>`).join("");
-        label.innerHTML = `<span${title}>${text}</span><select data-param="${name}">${options}</select>`;
-      } else {
-        const inputType = (def.type === "int" || def.type === "float") ? "number" : "text";
-        const step = def.type === "float" ? ` step="any"` : def.type === "int" ? ` step="1"` : "";
-        label.innerHTML = `<span${title}>${text}</span><input type="${inputType}" data-param="${name}" value="${value}"${step}/>`;
-      }
-      fields.appendChild(label);
-    }
-    form.appendChild(section);
-  }
-}
-
-function collectParamOverrides() {
-  const overrides = {};
-  document.querySelectorAll("#params-form [data-param]").forEach((el) => {
-    const name = el.dataset.param;
-    overrides[name] = paramSpec[name].type === "bool" ? el.checked : el.value;
-  });
-  return overrides;
 }
 
 /* ---------- actions ---------- */
 
-function wireActions() {
-  $("twin-start").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/jobs/twin/start", { params: collectParamOverrides() });
-      toast("Live twin launching (params saved)", "ok");
-    } catch (err) { toast(`Launch failed: ${err.message}`, "err"); }
+function wire() {
+  $("twin-start").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/twin/start"); toast("Starting mapper and twin", "ok");
   }));
-
-  $("twin-stop").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/jobs/twin/stop");
-      toast("Stopping the live twin…", "ok");
-    } catch (err) { toast(err.message, "err"); }
+  $("twin-stop").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/twin/stop"); toast("Stopping mapper and twin", "ok");
   }));
-
-  $("scan-start").addEventListener("click", (event) => withButton(event.target, async () => {
-    const config = roverConfig();
-    try {
-      await postJson("/api/jobs/scan360/start", {
-        rover_ip: config.rover_ip,
-        arm: config.arm,
-        degrees: Number($("scan-degrees").value) || 360,
-      });
-      toast(config.arm ? "360 scan started (ARMED with odometry stop)" : "360 scan started (rehearsal)", "ok");
-    } catch (err) { toast(`360 scan failed: ${err.message}`, "err"); }
+  $("scan-start").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/motion/start", motionBody({ kind: "scan" }));
+    toast(armed() ? "360 scan: the rover turns" : "360 scan rehearsed only", "ok");
   }));
-
-  $("scan-stop").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/jobs/scan360/stop");
-      toast("Stopping the 360 scan…", "ok");
-    } catch (err) { toast(err.message, "err"); }
+  $("drive-start").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/motion/start", motionBody({ kind: "drive", command: $("drive-command").value,
+                                                 amount: Number($("drive-amount").value) }));
+    toast(armed() ? "Driving: rehearsed first, stopped on the live pose" : "Rehearsing only", "ok");
   }));
-
-  $("goal-start").addEventListener("click", (event) => withButton(event.target, async () => {
-    const config = roverConfig();
-    try {
-      await postJson("/api/jobs/drive_goal/start", {
-        rover_ip: config.rover_ip,
-        arm: config.arm,
-        distance_m: Number($("goal-distance").value) || 1.0,
-      });
-      toast(config.arm
-        ? "Validated drive started (ARMED) — approved commands go to the rover"
-        : "Validated drive started (rehearsal) — twin only, nothing sent", "ok");
-    } catch (err) { toast(`Validated drive failed: ${err.message}`, "err"); }
+  $("motion-stop").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/motion/stop", { rover_ip: $("rover-ip").value.trim() }); toast("STOP sent", "ok");
   }));
-
-  $("goal-stop").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/jobs/drive_goal/stop");
-      toast("Stopping the validated drive…", "ok");
-    } catch (err) { toast(err.message, "err"); }
-  }));
-
-  $("tracking-start").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/tracking/start");
-      toast("Tracking resumed — twin follows the rover (map not rewritten)", "ok");
-    } catch (err) { toast(`Tracking failed: ${err.message}`, "err"); }
-  }));
-
-  $("tracking-stop").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/tracking/stop");
-      toast("Tracking paused — phone scan stopped", "ok");
-    } catch (err) { toast(err.message, "err"); }
-  }));
-
-  $("params-save").addEventListener("click", (event) => withButton(event.target, async () => {
-    try {
-      await postJson("/api/params", collectParamOverrides());
-      toast("Parameters saved", "ok");
-    } catch (err) { toast(`Save failed: ${err.message}`, "err"); }
-  }));
-
-  $("params-reset").addEventListener("click", () => {
-    const defaults = Object.fromEntries(
-      Object.entries(paramSpec).map(([name, def]) => [name, def.default]));
-    renderParamsForm(paramSpec, defaults);
-    toast("Defaults restored — press Save to apply", "info");
-  });
-
   $("arm-toggle").addEventListener("change", () => {
-    const armed = $("arm-toggle").checked;
-    document.body.classList.toggle("armed", armed);
-    $("arm-label").textContent = armed
-      ? "ARMED — drive and scan commands move the real rover"
-      : "Rehearsal mode — nothing is sent to the rover";
-    if (lastStatus) renderHeader(lastStatus);
+    document.body.classList.toggle("armed", armed());
+    $("arm-label").textContent = armed()
+      ? "ARMED: scan and drive move the real rover"
+      : "Rehearsal mode: nothing is sent to the rover";
+    if (status) render(status);
   });
-
-  ["phone-frame", "chase-frame"].forEach((id) => {
-    $(id).addEventListener("click", () => {
-      const img = $(id);
-      if (img.requestFullscreen) img.requestFullscreen();
-    });
-  });
-
-  for (const [id, key] of Object.entries(STORE_KEYS)) {
+  for (const [id, key] of Object.entries(STORE)) {      // not the arm switch: every page load starts disarmed
     const saved = localStorage.getItem(key);
     if (saved !== null) $(id).value = saved;
     $(id).addEventListener("change", () => localStorage.setItem(key, $(id).value));
   }
+  window.addEventListener("resize", () => status && drawMap(status.observation && status.observation.live_pose));
 }
 
-/* ---------- boot ---------- */
-
-async function main() {
-  wireActions();
-  try {
-    const [spec, values] = await Promise.all([api("/api/param_spec"), api("/api/params")]);
-    paramSpec = spec;
-    renderParamsForm(spec, values);
-  } catch (err) {
-    toast(`Could not load parameters: ${err.message}`, "err");
-  }
-  pollStatus();
-  pollPhoneCamera();
-  pollChaseCamera();
-}
-
-main();
+wire();
+poll();

@@ -32,7 +32,7 @@ static const uint8_t kMsgRealign = 10;
 static const uint8_t kMsgImu = 12;  // 6 float32 body: accel m/s^2, gyro rad/s
 static const uint8_t kMsgControlEnableImu = 13;
 static const uint8_t kMsgControlDisableImu = 14;
-// Flag bits (wire contract in src/digital_twin/live_scan.py):
+// Flag bits of mesh anchor messages (the host does not read these messages):
 //   kFlagHasNormals: trailing per-vertex normal block (smooth shading).
 //   kFlagTextured: anchor is textured from a keyframe image (trailing image id
 //                  + per-vertex UVs); colors are still sent as a fallback.

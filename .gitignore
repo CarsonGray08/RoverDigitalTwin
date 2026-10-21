@@ -6,15 +6,12 @@ __pycache__/
 build/
 dist/
 
-# Runtime state and generated maps
-state/
+# Runs: recordings and the mapper's outputs
 runs/
-*.nvblx
 *.scanlog
 
 # Local credentials
 .env
-*_api_key.txt
 
 # Platform build products
 ios/LiveScanner/.theos/
@@ -22,3 +19,6 @@ ios/LiveScanner/packages/
 robot/**/build/
 robot/**/install/
 robot/**/log/
+
+# The rover team's firmware and ROS workspaces, kept locally for reference
+FSITeam2 Files/

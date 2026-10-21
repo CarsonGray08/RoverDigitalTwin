@@ -1,0 +1,25 @@
+# Runtime configuration: one file for the mapper, the twin and the tools.
+# Every key is type-checked at startup; see src/rover_twin/config.py.
+
+[phone]
+port = 9099
+
+[depth]
+min_confidence = 2
+max_range_m = 5.0
+
+[rover]
+forward_axis = "-y"         # the RASSOR drives along its body -Y
+
+[mount]
+# Front-mounted iPhone: the quaternion points the phone camera along the
+# driving direction, 0.10 m ahead of the rover centre and 0.355 m above the
+# ground under it (measured: the floor is 35.2-35.7 cm below the camera in
+# both lab recordings), so the floor at the start is z = 0 and map heights
+# are heights above the floor.
+translation_m = [0.0, -0.10, 0.355]
+quaternion_wxyz = [0.0, 0.0, 0.7071067811865475, 0.7071067811865476]
+
+[run]
+root = "runs"
+record = true

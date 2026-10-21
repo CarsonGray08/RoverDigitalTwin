@@ -4,7 +4,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // Encodes length-prefixed RGB-D frames for the nvblox host mapper.
-// Message layouts are defined in src/digital_twin/live_scan.py.
+// The host side of these message layouts is src/rover_twin/phone/protocol.py.
 @interface LiveMeshStreamer : NSObject
 
 // Minimum seconds between sends for the same anchor id (bandwidth throttle).

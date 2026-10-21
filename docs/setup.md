@@ -1,46 +1,31 @@
-# Workstation and rover setup
+# Lab setup
 
-## Host workstation
+For an already configured workstation, go straight to [operations](operations.md).
 
-1. Install the NVIDIA driver, CUDA stack, `nvblox_torch`, and cuVSLAM environment
-   used by the lab workstation.
-2. Install Isaac Sim 6 with the Newton extensions used by `assets/rover.usd`.
-3. Edit `config/system.env`, especially `ISAAC_SIM_ROOT` and `ROVER_IP`.
-4. Create the host Python environment and run the tests:
+## Workstation
 
-   ```bash
-   python -m venv .venv
-   . .venv/bin/activate
-   python -m pip install -e '.[dev]'
-   pytest
-   ```
+Ubuntu 22.04 or 24.04, NVIDIA GPU, driver 570+, and Isaac Sim 6 installed:
 
-`torch`, `nvblox_torch`, cuVSLAM, Isaac, and ROS 2 are platform installations;
-they are not installed by `pip`. The ordinary unit suite does not require a GPU
-or Isaac.
-
-## Rover
-
-The ROS 2 serial bridge is in `robot/ros2_serial_bridge`. Build it with the
-rover's ROS 2 workspace and install the systemd service used on the rover. The
-wheel Arduino must appear at `/dev/arduino_wheel`.
-
-The matching Mode-B wheel firmware and its `DRV8825` driver are in
-`robot/firmware`. Do not flash the older four-byte command sketch from the
-paper-one archive; its byte order does not match this ROS bridge.
-
-The host sends HTTP commands to the rover controller on port 5000. The controller
-publishes `std_msgs/Int16MultiArray` to the serial bridge's ROS topic:
-
-```text
-/<ip-derived-rover-name>/wheel_instructions
-[command, speed, distance]
+```bash
+scripts/setup_workstation.sh ~/isaac-sim-6.0.0
 ```
 
-The namespace for `192.168.0.157` is `ip_192_168_0_157`.
+The script installs mapper dependencies, builds `.venv`, writes workstation
+paths to `config/system.env`, and checks nvblox, Isaac's Python and tests.
+If the lab recordings are present, it also checks replay against the reference
+map. Set `ROVER_IP` in `config/system.env`. Runtime settings are in
+`config/rover_twin.toml`.
 
-## iPhone
+## Rover and phone
 
-Build `ios/LiveScanner` with Theos, install it on a LiDAR-capable iPhone, and
-enter the workstation IP and port shown by the dashboard. Phone and workstation
-must be on the same access point.
+- Build `robot/ros2_serial_bridge` in the rover's ROS 2 workspace. Use the
+  matching Mode-B firmware in `robot/firmware`; the wheel Arduino must appear
+  at `/dev/arduino_wheel`. Enable the rover's controller and serial-bridge services.
+- The controller listens on port 5000 and publishes `[command, speed, distance]`
+  as `std_msgs/Int16MultiArray` to `/<rover-name>/wheel_instructions`.
+  The default name for `192.168.0.157` is `ip_192_168_0_157`; a custom
+  `ROVER_NAME` must also be passed to the drive tool with `--rover-name`.
+- The existing rover uses ROS 2 Humble on Ubuntu 22.04. Moving it to Ubuntu
+  24.04 requires Jazzy, updated service paths and rebuilt workspaces.
+- Build and install [LiveScanner](../ios/LiveScanner/README.md) on a LiDAR iPhone.
+  Connect it to the workstation IP on port 9099, on the same access point.
