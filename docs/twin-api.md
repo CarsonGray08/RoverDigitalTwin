@@ -119,6 +119,11 @@ To fly a plan, save `{"commands": [...], "goal": {...}}` (goal optional)
 and use `python -m rover_twin.ops.drive plan.json`. It rehearses only unless
 `--arm --rover-ip IP` is supplied. Offline rehearsal needs `--start X Y YAW_DEG`.
 An armed drive uses fresh live poses and rehearses the remaining plan before
-each command; refusal stops execution so your software can replan.
+each command; refusal stops execution so your software can replan. Without a
+goal, each rehearsal's goal is where the remaining commands end from the live
+pose then, so drift during one command does not refuse the next: give a goal
+when where the rover ends up matters. A plan with `"rehearse": false` is
+flown without rehearsing (the dashboard's 360° scan), still stopping each
+command on the live pose.
 `--level 1|2|3` sets real wheel speed (default 1), independently of simulated speed.
 See [operations](operations.md) for the hardware trial and logs.

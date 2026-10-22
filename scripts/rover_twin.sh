@@ -26,11 +26,21 @@ MAPPER_PID=$!
   --experience "$NEWTON_KIT" &
 TWIN_PID=$!
 
+signal_both() {
+  kill "-$1" "$MAPPER_PID" 2>/dev/null || true
+  # python.sh runs Isaac's python as a child and does not pass signals on.
+  pkill "-$1" -P "$TWIN_PID" 2>/dev/null || kill "-$1" "$TWIN_PID" 2>/dev/null || true
+}
+
 cleanup() {
   trap - EXIT INT TERM
-  # python.sh runs Isaac's python as a child and does not pass signals on.
-  kill -INT "$MAPPER_PID" 2>/dev/null || true
-  pkill -INT -P "$TWIN_PID" 2>/dev/null || kill -INT "$TWIN_PID" 2>/dev/null || true
+  signal_both INT
+  # 20 s to save the run's outputs; then forced, so neither keeps its ports.
+  for _ in $(seq 40); do
+    kill -0 "$MAPPER_PID" 2>/dev/null || kill -0 "$TWIN_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  signal_both TERM
   wait "$MAPPER_PID" "$TWIN_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

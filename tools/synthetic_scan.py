@@ -99,11 +99,17 @@ def _slab(o, d, lo, hi):
 
 
 def write(kind: str, path: str | Path, *, yaw_drift_deg_s: float = 0.0, z_drift_m_s: float = 0.0, width: int = 256,
-          rgbd_hz: float = 10.0, noise_per_m: float = 0.01, seed: int = 0) -> Path:
-    """Write ``path`` and its truth file; returns the truth file's path."""
+          rgbd_hz: float = 10.0, noise_per_m: float = 0.01, seed: int = 0, pitch_deg: float = 0.0) -> Path:
+    """Write ``path`` and its truth file; returns the truth file's path.
+    ``pitch_deg`` tilts the phone down on its mount from the configured level."""
     path = Path(path)
     lab = config.load(Path(__file__).parents[1] / "config" / "rover_twin.toml")
     mount = Mount.from_config(lab)
+    if pitch_deg:      # about the camera's own x axis, at the same mounting point: +z toward +y (down)
+        c, s_ = math.cos(math.radians(pitch_deg)), math.sin(math.radians(pitch_deg))
+        tilt = np.eye(4)
+        tilt[1:3, 1:3] = [[c, s_], [-s_, c]]
+        mount = Mount(mount.T_R_C @ tilt, mount.forward)
     rng = np.random.default_rng(seed)
     s = width / 256
     depth_intr = Intrinsics(210.0 * s, 210.0 * s, 128.0 * s, 96.0 * s, width, width * 3 // 4)

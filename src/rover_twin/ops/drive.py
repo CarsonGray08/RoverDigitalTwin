@@ -4,16 +4,21 @@
     python -m rover_twin.ops.drive plan.json --start 0 0 0        # rehearse from a pose (offline twin)
     python -m rover_twin.ops.drive plan.json --arm --rover-ip 192.168.0.157
 
-``plan.json`` is ``{"commands": [...], "goal": {...}}`` in the twin's schema
-(docs/twin-api.md); without a goal it is where the commands end on flat
-ground from the live pose. Before every command, the rest of the plan is
+``plan.json`` is ``{"commands": [...], "goal": {...}, "rehearse": true}`` in
+the twin's schema (docs/twin-api.md); without a goal it is where the rest of the commands end
+on flat ground from the live pose at each rehearsal, so the drift of one
+command (a turn in place wanders) does not refuse the next; give a goal when
+where the rover ends up matters. Before every command, the rest of the plan is
 rehearsed from the rover's live pose on the latest map, and a refusal stops
 the drive there: that is the moment for the software that wrote the plan to
 replan. A command is sent as a bounded step count (ops/rover.py) and stopped
 when the live pose says it is done; the rover is stopped on finish, on any
 failure (including a fault the rover reports, or a live pose that is late or
 lost), and on Ctrl-C. Without ``--arm`` nothing moves: the plan is only
-rehearsed.
+rehearsed. A plan with ``"rehearse": false`` is flown without asking the twin
+(the dashboard's 360 scan, turns in place the twin cannot judge well); the
+live pose still stops every command. While the mapper is connected but has
+not sent a live pose yet (a scan just starting), the drive waits for one.
 
 Each command flown is logged to ``--log`` (JSON lines): start and end pose,
 how long it really took, and how long the twin predicted.
@@ -38,6 +43,7 @@ STOP_SHORT_M, STOP_SHORT_DEG = 0.01, 1.0     # the rover coasts a little after S
 STALL_S = 3.0                         # no progress for this long while moving: stuck
 TIMEOUT_S = 120.0                     # one command, however slow the rover
 SETTLE_S = 0.5                        # after STOP, before the next live pose
+POSE_WAIT_S = 15.0                    # for the first live pose of a scan just starting
 
 
 @dataclass(frozen=True)
@@ -54,17 +60,19 @@ class Driver:
         self.pose = pose or (lambda: live_pose(twin))
         self.clock, self.sleep = clock, sleep
 
-    def run(self, commands: list[dict], goal=None) -> Outcome:
+    def run(self, commands: list[dict], goal=None, rehearse: bool = True) -> Outcome:
         try:
             start = self.pose()
-            goal = goal or self.twin.nominal_end(start, commands)
             for i, command in enumerate(commands):
-                check = self.twin.rehearse(start, commands[i:], goal)
-                if not check["approved"]:
-                    return Outcome(False, f"command {i}: the twin refused the rest of the plan: "
-                                          f"{check.get('failure_type')}: {check['reason']}", i)
+                predicted_s = None
+                if rehearse:
+                    check = self.twin.rehearse(start, commands[i:], goal)
+                    if not check["approved"]:
+                        return Outcome(False, f"command {i}: the twin refused the rest of the plan: "
+                                              f"{check.get('failure_type')}: {check['reason']}", i)
+                    predicted_s = check["step_results"][0]["duration_s"]
                 status, end, seconds = self._fly(command, start)
-                self._record(i, command, start, end, status, seconds, check["step_results"][0]["duration_s"])
+                self._record(i, command, start, end, status, seconds, predicted_s)
                 if status != "completed":
                     return Outcome(False, f"command {i}: {status}", i)
                 self.sleep(SETTLE_S)
@@ -109,8 +117,9 @@ class Driver:
         entry = {"t": time.time(), "index": index, "command": command, "status": status,
                  "start": list(start), "end": list(end), "seconds": round(seconds, 3),
                  "twin_predicted_s": predicted_s}
+        twin = "not rehearsed" if predicted_s is None else f"twin {predicted_s:.1f} s"
         print(f"  {index}: {command['command']} {command['distance']} -> {status} in {entry['seconds']:.1f} s "
-              f"(twin {predicted_s:.1f} s), at ({end[0]:.3f}, {end[1]:.3f}, {end[2]:.1f})")
+              f"({twin}), at ({end[0]:.3f}, {end[1]:.3f}, {end[2]:.1f})")
         if self.log is not None:
             with open(self.log, "a") as fh:
                 fh.write(json.dumps(entry) + "\n")
@@ -122,6 +131,19 @@ def live_pose(twin: TwinClient) -> tuple[float, float, float]:
     if live is None or live["age_s"] > POSE_MAX_AGE_S:
         raise RuntimeError(f"no fresh live pose from the twin ({live}): is the phone mapping?")
     return live["x"], live["y"], live["yaw_deg"]
+
+
+def wait_for_pose(twin: TwinClient, timeout_s: float = POSE_WAIT_S, poll_s: float = 0.5) -> tuple[float, float, float]:
+    """The live pose; while the mapper is connected but has not anchored and
+    sent one yet, waiting up to ``timeout_s``. Without a mapper, at once."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            return live_pose(twin)
+        except RuntimeError:
+            if time.monotonic() >= deadline or not twin.observation()["mapper_connected"]:
+                raise
+        time.sleep(poll_s)
 
 
 def _along(kind: str, start, now) -> float:
@@ -155,21 +177,26 @@ def main(argv: list[str] | None = None) -> None:
     plan = json.loads(args.plan.read_text())
     goal = plan.get("goal")
     goal = (goal["x"], goal["y"], goal["yaw_deg"]) if goal else None
+    rehearse = plan.get("rehearse", True)
     twin = TwinClient(args.twin)
     try:
-        start = tuple(args.start) if args.start else live_pose(twin)
+        start = tuple(args.start) if args.start else wait_for_pose(twin)
     except RuntimeError as exc:
         raise SystemExit(f"{exc} (rehearsing on the offline twin? pass --start X Y YAW_DEG)")
+    if not args.arm and not rehearse:
+        print("not armed and not rehearsed: nothing was sent to the rover")
+        return
     if not args.arm:
         result = twin.rehearse(start, plan["commands"], goal)
         print(json.dumps({k: result.get(k) for k in ("approved", "reason", "failure_type", "duration_s",
                                                        "final_pose")}, indent=1))
-        print("not armed: nothing was sent to the rover")
+        print("not armed: nothing was sent to the rover" if result["approved"] else
+              f"not armed, and the twin refused it: {result.get('failure_type')}: {result['reason']}")
         return
     if not args.rover_ip:
         parser.error("--arm needs --rover-ip")
     rover = Rover(args.rover_ip, args.level, name=args.rover_name)
-    outcome = Driver(twin, rover, args.log).run(plan["commands"], goal)
+    outcome = Driver(twin, rover, args.log).run(plan["commands"], goal, rehearse=rehearse)
     print(("done: " if outcome.completed else "stopped: ") + outcome.reason)
 
 

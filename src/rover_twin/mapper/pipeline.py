@@ -8,8 +8,9 @@ Each frame carries ARKit's pose. The pose graph corrects it: in the plane
 when a keyframe closes a loop, and in height wherever two keyframes see the
 same floor (ARKit's height drifts a few cm over a 360; measuring it on the
 floor, rather than pinning the rover to an assumed floor, keeps the terrain
-the rover drives over). Separate phone poses anchor the map into the twin and
-say whether ARKit is tracking: while it is not, frames are neither fused nor
+the rover drives over). Separate phone poses anchor the map into the twin, once
+the phone is scanning (it streams poses from launch, while still in a hand),
+and say whether ARKit is tracking: while it is not, frames are neither fused nor
 published as the live pose, which then ages until the drive loop stops the
 rover. When the graph moves or the anchor changes (the first one, or Reset
 Position), the keyframe buffer is re-fused at the corrected poses and the
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 import numpy as np
+from scipy import ndimage
 
 from rover_twin import frames
 from rover_twin.config import Config
@@ -44,6 +46,9 @@ from rover_twin.pose.graph import PoseGraph
 SAMPLE_STRIDE = 8     # pixel stride of the per-frame surface samples kept for the seam metric
 GRAPH_STRIDE = 4      # pixel stride of a keyframe's surface for registration
 REFUSE_M, REFUSE_DEG = 0.01, 0.2    # re-fuse when a closure moves or lifts any keyframe this much
+SELF_PAD_M = 0.05     # around the footprint, still too close for the camera to see ground: it is the rover
+EDGE_RATIO = 0.1      # farther than its nearest neighbour by this much of its depth: behind an edge
+EDGE_SIZE = 5         # pixels: the neighbourhood, wide enough to see across a band of flying pixels
 G_T_A = frames.M_AXIS   # the graph's frame: ARKit's world turned Z up, so it ignores the anchor
 A_T_G = frames.rigid_inverse(G_T_A)
 
@@ -79,6 +84,7 @@ class Mapper:
         self.rev = 0
         self._last_motion: tuple[float, Pose2D] | None = None
         self._tracking = False      # the latest phone pose had normal tracking
+        self._scanning = False      # RGB-D has streamed: the phone is mounted, so poses may anchor
         self._last_pose: LivePose | None = None
         self._last_mesh: VisualMesh | None = None
         self._mesh_due = clock() + cfg.tsdf.mesh_interval_s
@@ -99,11 +105,13 @@ class Mapper:
             self.watch.count("malformed")
             return
         if isinstance(message, RgbdFrame):
+            self._scanning = True
             self.watch.since("decoded", arrival.t)
             self._on_frame(message, arrival.t)
         elif isinstance(message, PhonePose):
             self._tracking = message.tracking == TRACKING_NORMAL
-            if self.alignment.offer(message):
+            if self._scanning and self.alignment.offer(message):
+                self._anchored(message.T_A_C)
                 self._refuse(arrival.t)
         elif isinstance(message, Event) and message.kind == Msg.REALIGN:
             self.watch.count("realign")
@@ -142,7 +150,7 @@ class Mapper:
         if dirty:
             self._send_tiles(dirty, t, reset=False)
             self.watch.since("tiles_sent", t)
-        self._last_pose = LivePose(self.rev, t, frame.t_phone, rover)
+        self._last_pose = LivePose(self.rev, t, frame.t_phone, rover, self._ground_z(T_W_C))
         self.link.send(self._last_pose)
         self.watch.since("pose_sent", t)
         if self.clock() >= self._mesh_due:
@@ -182,12 +190,33 @@ class Mapper:
         t1 = self.clock()
         points = frames.backproject(kf.depth, intr)
         dirty = self.grid.integrate(frames.transform(T_W_C, points), T_W_C[:3, 3])
-        rover = frames.rover_pose(T_W_C, self.mount)        # it stands on ground no sensor sees
-        dirty |= self.grid.infer_footprint((rover.x, rover.y))
-        dirty |= self.grid.infer_footprint((self.start.x, self.start.y))
+        dirty |= self._infer_under(T_W_C)
+        dirty |= self.grid.infer_footprint((self.start.x, self.start.y), self.cfg.start.z_m)
         self.watch.took("tsdf", t1 - t0)
         self.watch.took("elevation", self.clock() - t1)
         return dirty
+
+    def _infer_under(self, T_W_C: np.ndarray) -> set[Key]:
+        """The rover stands on ground no sensor sees. Where the ring around it
+        is not seen yet (a turn in place drifts the centre off the start
+        footprint), its own wheels give the height, but only on the start's
+        floor: a phone carried in a hand is not standing on anything."""
+        rover = frames.rover_pose(T_W_C, self.mount)
+        ground_z = self._ground_z(T_W_C)
+        on_floor = abs(ground_z - self.cfg.start.z_m) < self.cfg.elevation.step_m
+        return self.grid.infer_footprint((rover.x, rover.y), ground_z if on_floor else None)
+
+    def _anchored(self, T_A_C: np.ndarray) -> None:
+        """Every rover pose from here on uses the mount as measured at the anchor."""
+        self.mount = self.alignment.mount
+        R = (G_T_A @ T_A_C)[:3, :3]
+        pitch, roll = math.degrees(math.asin(-R[2, 2])), math.degrees(math.asin(R[2, 0]))
+        self.watch.values["mount_pitch_deg"], self.watch.values["mount_roll_deg"] = round(pitch, 2), round(roll, 2)
+        print(f"mapper: map anchored; phone tilted {pitch:.1f} deg down, {roll:.1f} deg roll", flush=True)
+
+    def _ground_z(self, T_W_C: np.ndarray) -> float:
+        """The ground under the rover: the rover frame's origin is on it."""
+        return float((T_W_C @ self.mount.T_C_R)[2, 3])
 
     def _refuse(self, t: float) -> None:
         """Rebuild every output at the current anchor from the keyframe buffer:
@@ -199,15 +228,15 @@ class Mapper:
         for k, kf in enumerate(self.keyframes):
             self._fuse(kf, self._world(kf.T_A_C, k))
         for k, kf in enumerate(self.keyframes):    # where it stood, now that the rings around are seen
-            rover = frames.rover_pose(self._world(kf.T_A_C, k), self.mount)
-            self.grid.infer_footprint((rover.x, rover.y))
+            self._infer_under(self._world(kf.T_A_C, k))
         self._last_motion = None
         self._send_tiles(set(self.grid.tiles), t, reset=True)
         self._send_mesh(t)
         if self.track:
             last = self.track[-1]
-            rover = frames.rover_pose(self._world(last.T_A_C, last.node), self.mount)
-            self._last_pose = LivePose(self.rev, t, last.t_phone, rover)
+            T_W_C = self._world(last.T_A_C, last.node)
+            self._last_pose = LivePose(self.rev, t, last.t_phone, frames.rover_pose(T_W_C, self.mount),
+                                       self._ground_z(T_W_C))
             self.link.send(self._last_pose)
         self.watch.took("refuse", self.clock() - t0)
         self.watch.count("refuses")
@@ -227,10 +256,34 @@ class Mapper:
 
     def _usable_depth(self, frame: RgbdFrame) -> np.ndarray:
         depth = frame.depth
-        bad = ~np.isfinite(depth) | (depth > self.cfg.depth.max_range_m)
+        measured = np.isfinite(depth) & (depth > 0)
+        # Flying pixels: at a depth edge (a wheel against the floor behind it)
+        # the sensor reports depths in between, high-confidence, which land as
+        # bumps beside the object. They are farther than the object's own edge,
+        # which is kept, so the edge is found in every measured depth: a dark
+        # tyre's own pixels are low-confidence. Distant floor seen at a grazing
+        # angle steps less than EDGE_RATIO from one pixel to the next and is kept.
+        nearest = ndimage.minimum_filter(np.where(measured, depth, np.inf), size=EDGE_SIZE)
+        bad = ~measured | (depth > self.cfg.depth.max_range_m) | (depth - nearest > EDGE_RATIO * depth)
         if frame.confidence is not None:
             bad |= frame.confidence < self.cfg.depth.min_confidence
-        return np.where(bad, 0.0, depth).astype(np.float32)
+        depth = np.where(bad, 0.0, depth)
+        return np.where(self._on_rover(depth, frame.depth_intrinsics), 0.0, depth).astype(np.float32)
+
+    def _on_rover(self, depth: np.ndarray, intr) -> np.ndarray:
+        """Pixels that see the rover itself, such as a wheel at the edge of a
+        phone pointed down: in plan inside its footprint (and SELF_PAD_M),
+        ground the camera cannot see from where it is mounted. Fixed in the
+        rover frame, so no pose is needed."""
+        v, u = np.mgrid[0:depth.shape[0], 0:depth.shape[1]]
+        camera = np.stack([(u - intr.cx) / intr.fx * depth, (v - intr.cy) / intr.fy * depth, depth], -1)
+        body = frames.transform(self.mount.T_R_C, camera.reshape(-1, 3))
+        forward = self.mount.forward
+        left = np.cross([0.0, 0.0, 1.0], forward)
+        rc = self.cfg.rover
+        inside = ((np.abs(body @ forward) < rc.footprint_half_length_m + SELF_PAD_M)
+                  & (np.abs(body @ left) < rc.footprint_half_width_m + SELF_PAD_M))
+        return inside.reshape(depth.shape) & (depth > 0)
 
     def _send_tiles(self, keys: set[Key], t: float, reset: bool) -> None:
         self.rev += 1

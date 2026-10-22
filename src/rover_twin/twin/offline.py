@@ -57,7 +57,7 @@ class KinematicRover:
     def drive(self, left_rad_s: float, right_rad_s: float) -> None:
         self._wheels = (left_rad_s, right_rad_s)
 
-    def follow(self, pose: Pose2D, min_z: float) -> None:
+    def follow(self, pose: Pose2D, z: float) -> None:
         self._pose = pose
 
     def render(self) -> None:

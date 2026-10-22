@@ -129,6 +129,26 @@ class Mount:
     def T_C_R(self) -> np.ndarray:
         return rigid_inverse(self.T_R_C)
 
+    def leveled(self, T_W_C: np.ndarray) -> "Mount":
+        """This mount with the camera's tilt and roll measured instead of
+        configured: ``T_W_C`` (any Z-up frame) is the camera on a rover
+        standing level, so the camera's own up is the rover's. The camera's
+        heading on the rover (its twist, which gravity cannot show) and the
+        translation stay as configured."""
+        up = T_W_C[:3, :3].T @ np.array([0.0, 0.0, 1.0])            # rover up, in camera axes
+        axis = np.array([0.0, 0.0, 1.0]) - up[2] * up                # optical axis, made level
+        heading = self.T_R_C[:3, :3] @ np.array([0.0, 0.0, 1.0])     # where it points on the rover
+        heading[2] = 0.0
+        if np.linalg.norm(axis) < 1e-3 or np.linalg.norm(heading) < 1e-3:
+            return self                                              # looking straight up or down
+        axis, heading = axis / np.linalg.norm(axis), heading / np.linalg.norm(heading)
+        z = np.array([0.0, 0.0, 1.0])
+        in_camera = np.column_stack([up, axis, np.cross(up, axis)])
+        in_rover = np.column_stack([z, heading, np.cross(z, heading)])
+        T_R_C = self.T_R_C.copy()
+        T_R_C[:3, :3] = in_rover @ in_camera.T
+        return Mount(T_R_C, self.forward)
+
 
 def forward_vector(axis: str) -> np.ndarray:
     return np.array(_FORWARD_AXES[axis])

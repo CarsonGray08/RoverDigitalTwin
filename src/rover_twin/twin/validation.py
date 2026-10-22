@@ -103,7 +103,7 @@ class Result:
 
 class SimRover(Protocol):
     steps_per_second: float
-    ride_height_m: float         # articulation root above the ground it rests on
+    ride_height_m: float         # root body above the ground it rests on
 
     def step(self) -> None: ...
 
@@ -113,7 +113,7 @@ class SimRover(Protocol):
 
     def drive(self, left_rad_s: float, right_rad_s: float) -> None: ...
 
-    def follow(self, pose: Pose2D, min_z: float) -> None: ...
+    def follow(self, pose: Pose2D, z: float) -> None: ...
 
     def render(self) -> None: ...
 
@@ -161,7 +161,8 @@ class Validator:
                       None, error_m, error_deg, tuple(trajectory), tuple(steps_done), tuple(ends), dt)
 
     def resting_z(self, pose: Pose2D) -> float:
-        """Root height that puts the rover on the highest known ground under it."""
+        """Root height that puts the rover on the highest known ground under
+        it: a rollout must never start inside a bump. Physics settles it from there."""
         heights, states = self._footprint(pose)
         known = heights[states != UNKNOWN]
         return (known.max() if known.size else self.cfg.start.z_m) + self.rover.ride_height_m

@@ -2,10 +2,13 @@
 
     $ISAAC_SIM_ROOT/python.sh -m rover_twin.twin.main --experience NEWTON_KIT [--run-dir RUN]
 
-One loop owns the stage. Between physics steps it applies what the link
-delivered, terrain first, then the pose the sim rover follows. Validation
+One loop owns the stage. It applies what the link delivered, terrain first,
+then the pose the sim rover follows. Physics runs only in a rollout: between
+them the sim rover is held where the real one is, since live tiles become
+solid only at the reload before a rollout (it would fall through them). Validation
 requests from the HTTP API run as jobs in the same loop, so the terrain never
-changes under a rollout and the next one starts from the latest map. The live
+changes under a rollout and the next one starts from the latest map; the
+operator's view is drawn as a rollout runs, so a rehearsal plays on screen. The live
 pose is answered at once, never behind a job: the drive loop stops the real
 rover on it.
 """
@@ -30,8 +33,10 @@ from rover_twin.twin.terrain import StageTerrain, TerrainMap
 from rover_twin.twin.validation import Request, SimRover, Validator
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "config" / "rover_twin.toml"
-STALL_S = 0.05      # a physics step slower than this is a stall
-RENDER_HZ = 20.0    # the operator's view, drawn between physics steps
+STALL_S = 0.05      # a loop iteration slower than this is a stall
+IDLE_S = 0.002      # between updates, wait this long for a job
+RENDER_HZ = 60.0    # the operator's view, drawn between physics steps (~9 ms a frame on the 5090)
+REHEARSAL_RENDER_HZ = 30.0   # and during a rehearsal, where every frame drawn slows the rollout
 POSE_HZ = 10.0      # the sim rover's pose, read for /observation
 
 
@@ -40,47 +45,39 @@ class Twin:
                  clock=time.monotonic) -> None:
         self.cfg, self.rover, self.terrain, self.link, self.clock = cfg, rover, terrain, link, clock
         self.map = TerrainMap()
-        self.validator = Validator(cfg, rover, self.map)
+        self.validator = Validator(cfg, _Drawn(rover, lambda: self._draw(self._rehearsal_render_s)), self.map)
         self.jobs: queue.Queue = queue.Queue()
         self.live: LivePose | None = None
         self.watch = Stopwatch(clock)
         self._render_s = 1.0 / RENDER_HZ if cfg.twin.gui else 0.0
+        self._rehearsal_render_s = 1.0 / REHEARSAL_RENDER_HZ if cfg.twin.gui else 0.0
         self._render_due = 0.0
-        self._sim_s = self._wall_s = 0.0
         self._speedups: list[float] = []
         self._terrain_changed = False     # since physics last read the stage
         self.rover_pose, self._pose_due = rover.pose(), 0.0   # read here, served from other threads
 
     def tick(self) -> None:
-        """One iteration: the latest updates, then a queued job or a physics step,
-        and a frame of the operator's view when one is due. Updates go first so
-        a validation runs on the newest map."""
+        """One iteration: the latest updates, then a queued job, and a frame of
+        the operator's view when one is due. Updates go first so a validation
+        runs on the newest map."""
         start = self.clock()
         update = self.link.take()
         if update is not None:
             self._apply(update)
+            for t in update.tile_arrivals:        # solid for the next rollout, which reloads first
+                self.watch.since("collider_live", t)
         try:
-            self._serve(*self.jobs.get_nowait())
+            self._serve(*self.jobs.get(timeout=IDLE_S if update is None else 0.0))
             return
         except queue.Empty:
             pass
-        self.rover.step()
-        if update is not None:
-            for t in update.tile_arrivals:
-                self.watch.since("collider_live", t)
         wall = self.clock() - start
         self.watch.took("tick", wall)
         if wall > STALL_S:
             self.watch.count("stalls")
-        if self._render_s and self.clock() >= self._render_due:
-            t0 = self.clock()
-            self.rover.render()
-            self.watch.took("render", self.clock() - t0)
-            self._render_due = self.clock() + self._render_s
+        self._draw(self._render_s)
         if self.clock() >= self._pose_due:
             self.rover_pose, self._pose_due = self.rover.pose(), self.clock() + 1.0 / POSE_HZ
-        self._sim_s += 1.0 / self.rover.steps_per_second
-        self._wall_s += self.clock() - start          # real time includes drawing the view
 
     def submit(self, kind: str, payload=None) -> tuple[int, dict]:
         """From any thread: run a job in the loop and wait for its reply."""
@@ -89,12 +86,19 @@ class Twin:
         return reply.get()
 
     def write_metrics(self, path: Path) -> None:
-        if self._wall_s > 0:
-            self.watch.values["real_time_factor"] = round(self._sim_s / self._wall_s, 3)
         if self._speedups:
             self.watch.values["validation_speedup_min"] = round(min(self._speedups), 2)
             self.watch.values["validation_speedup_median"] = round(statistics.median(self._speedups), 2)
         self.watch.write(path)
+
+    def _draw(self, every_s: float) -> None:
+        """A frame of the operator's view, if one is due at this rate."""
+        if every_s and self.clock() >= self._render_due:
+            t0 = self.clock()
+            self.rover.render()
+            self.watch.took("render", self.clock() - t0)
+            # From when it was due, not when it finished: a 9 ms frame would cut 60 Hz to 39.
+            self._render_due = max(self._render_due + every_s, self.clock())
 
     def _apply(self, update: Update) -> None:
         self.map.apply(update)
@@ -109,7 +113,7 @@ class Twin:
         for t in update.tile_arrivals:
             self.watch.since("tiles_applied", t)
         if update.pose is not None:     # followed before published: other threads read self.live
-            self.rover.follow(update.pose.pose, self.validator.resting_z(update.pose.pose))
+            self.rover.follow(update.pose.pose, update.pose.z_m + self.rover.ride_height_m)
             self.live = update.pose
             self.watch.since("pose_applied", update.pose.t_arrival)
 
@@ -127,7 +131,7 @@ class Twin:
                 self.watch.took("validation", wall)
                 self._speedups.append(result.duration_s / max(wall, 1e-9))
                 if self.live is not None:          # the sim rover goes back to the real one
-                    self.rover.follow(self.live.pose, self.validator.resting_z(self.live.pose))
+                    self.rover.follow(self.live.pose, self.live.z_m + self.rover.ride_height_m)
                 reply.put((200, result.to_dict()))
             else:
                 reply.put((200, self.map.dense(self.cfg.rover.max_step_m)))
@@ -155,6 +159,21 @@ class Twin:
             "terrain_tiles": len(self.map.patches),
             "mapper_connected": self.link.connected.is_set(),
         }
+
+
+class _Drawn:
+    """The sim rover as validation drives it: each physics step also draws the
+    operator's view when a frame is due, so the rehearsal is seen as it runs."""
+
+    def __init__(self, rover: SimRover, draw) -> None:
+        self._rover, self._draw = rover, draw
+
+    def __getattr__(self, name: str):
+        return getattr(self._rover, name)
+
+    def step(self) -> None:
+        self._rover.step()
+        self._draw()
 
 
 def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:

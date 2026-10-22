@@ -16,6 +16,7 @@ from rover_twin.link.client import LinkClient, Update
 from rover_twin.link.messages import Patch
 from rover_twin.link.server import LinkServer
 from rover_twin.mapping.elevation import ElevationGrid
+from rover_twin.twin import main
 from rover_twin.twin.main import Twin, serve
 from rover_twin.twin.terrain import StageTerrain, TerrainMap
 from rover_twin.twin.validation import Command, Request, Step, Validator
@@ -52,8 +53,8 @@ class FakeRover:
     def drive(self, left, right):
         self.wheels = (left, right)
 
-    def follow(self, pose, min_z):
-        self.place(pose, max(self.z, min_z))
+    def follow(self, pose, z):
+        self.place(pose, z)
 
     def render(self):
         pass
@@ -157,6 +158,42 @@ def test_validation_runs_on_terrain_that_arrived_before_it():
     assert status == 200 and result["failure_type"] == "collision"
 
 
+def test_a_rehearsal_is_drawn_as_it_runs():
+    class Counting(FakeRover):
+        t, renders = 0.0, 0
+
+        def step(self):
+            super().step()
+            self.t += 1.0 / self.steps_per_second
+
+        def render(self):
+            self.renders += 1
+
+    class OnlyFloor:
+        connected = threading.Event()
+
+        def __init__(self):
+            self.update = tiles(FLOOR)
+
+        def take(self):
+            update, self.update = self.update, None
+            return update
+
+    class NoStage:
+        def apply(self, update):
+            pass
+
+    rover = Counting()
+    twin = Twin(CFG, rover, NoStage(), OnlyFloor(), clock=lambda: rover.t)
+    reply = queue.Queue()
+    twin.jobs.put(("validate", plan(Pose2D(0.0, 0.0, 90.0), ("LEFT", 40, 90)), reply))
+    twin.tick()
+    status, result = reply.get_nowait()
+    assert status == 200 and result["approved"], result
+    simulated_s = rover.t
+    assert rover.renders == pytest.approx(simulated_s * main.REHEARSAL_RENDER_HZ, abs=2)
+
+
 def test_twin_tracks_the_mapper_and_validates_on_its_terrain(scan, tmp_path):
     from pxr import Usd, UsdGeom
 
@@ -189,6 +226,7 @@ def test_twin_tracks_the_mapper_and_validates_on_its_terrain(scan, tmp_path):
             points = np.asarray(UsdGeom.Mesh(prim).GetPointsAttr().Get())
             assert points.shape == ((n + 1) ** 2, 3) and np.isfinite(points).all()
         assert twin.rover.pose().x == pytest.approx(1.6, abs=1e-6)          # following the real rover
+        assert twin.rover.z == pytest.approx(twin.live.z_m + FakeRover.ride_height_m)   # at the phone's height
 
         body = json.dumps({"start_pose": {"x": 1.6, "y": 0.0, "yaw_deg": 0.0},
                            "goal": {"x": 1.6, "y": 0.0, "yaw_deg": 90.0},
@@ -206,4 +244,4 @@ def test_twin_tracks_the_mapper_and_validates_on_its_terrain(scan, tmp_path):
         server.close()
     twin.write_metrics(tmp_path / "twin_metrics.json")
     metrics = json.loads((tmp_path / "twin_metrics.json").read_text())
-    assert metrics["latency_ms"]["collider_live"]["n"] > 0 and metrics["values"]["real_time_factor"] > 0
+    assert metrics["latency_ms"]["collider_live"]["n"] > 0

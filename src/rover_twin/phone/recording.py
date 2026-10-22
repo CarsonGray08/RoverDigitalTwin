@@ -37,6 +37,8 @@ class Recorder:
 
     def write(self, arrival: Arrival) -> None:
         with self._lock:
+            if self._fh.closed:          # the phone was still streaming as the mapper stopped
+                return
             if self._t0 is None:
                 self._t0 = arrival.t
             self._fh.write(_RECORD.pack(arrival.t - self._t0, len(arrival.payload)))

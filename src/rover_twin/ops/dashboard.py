@@ -1,5 +1,6 @@
 """Operator dashboard: start the twin, watch the map and the rover, and run a
-360 scan or a drive, behind an arm switch.
+360 scan or a drive, behind an arm switch. The scan's turns are flown on the
+live pose without the twin's rehearsal; a drive is rehearsed first.
 
     scripts/dashboard.sh                # prints http://<workstation>:8090
 
@@ -20,12 +21,13 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from rover_twin import config
 from rover_twin.ops.rover import Rover, RoverError
@@ -61,17 +63,24 @@ class Job:
         threading.Thread(target=self._pump, args=(self.popen,), daemon=True).start()
 
     def stop(self) -> None:
+        """Until the whole group is gone, not just its leader: a child left
+        behind keeps its ports, and the next start cannot use them."""
         popen = self.popen
-        for sig, grace_s in ((signal.SIGINT, 10.0), (signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
-            if popen is None or popen.poll() is not None:
-                return
+        if popen is None:
+            return
+        for sig, grace_s in ((signal.SIGINT, 25.0), (signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
             try:
                 os.killpg(popen.pid, sig)
-                popen.wait(timeout=grace_s)
             except ProcessLookupError:
                 return
-            except subprocess.TimeoutExpired:
-                continue
+            deadline = time.monotonic() + grace_s
+            while time.monotonic() < deadline:
+                popen.poll()                      # reap the leader, or the group lives on as its zombie
+                try:
+                    os.killpg(popen.pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.2)
 
     def status(self) -> dict:
         return {"running": self.running(), "returncode": None if self.popen is None else self.popen.poll(),
@@ -108,8 +117,10 @@ class Dashboard:
 
     def start_motion(self, body: dict) -> None:
         """A 360 scan or one command, rehearsed on the twin; flown if armed."""
+        rehearse = True
         if body.get("kind") == "scan":
-            commands = SCAN
+            self.start_phone_scan()
+            commands, rehearse = SCAN, False
         else:
             command, amount = body.get("command"), float(body.get("amount", 0))
             if command not in COMMANDS or amount <= 0:
@@ -117,7 +128,7 @@ class Dashboard:
             units = self.cfg.rover.distance_units_per_m if command in ("FWD", "REV") else 1.0
             commands = [{"command": command, "speed": SPEED, "distance": round(amount * units)}]
         plan = STATE / "plan.json"
-        plan.write_text(json.dumps({"commands": commands}))
+        plan.write_text(json.dumps({"commands": commands, "rehearse": rehearse}))
         cmd = [sys.executable, "-m", "rover_twin.ops.drive", str(plan), "--twin", self.twin_url,
                "--log", str(REPO / "runs" / "drive_log.jsonl")]
         if body.get("arm"):
@@ -129,6 +140,17 @@ class Dashboard:
                 cmd += ["--rover-name", os.environ["ROVER_NAME"]]
         (REPO / "runs").mkdir(exist_ok=True)
         self.motion.start(cmd)
+
+    def start_phone_scan(self) -> None:
+        """Tell the phone, through the mapper, to start scanning (harmless if it already is)."""
+        url = f"http://127.0.0.1:{self.cfg.phone.control_port}/scan/start"
+        try:
+            with urlopen(Request(url, b"", method="POST"), timeout=2.0):
+                pass
+        except HTTPError as exc:
+            raise RuntimeError(f"could not start the phone's scan: {exc.read().decode(errors='replace')}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"the mapper is not answering ({exc}): start the mapper and twin first") from exc
 
     def stop_motion(self, rover_ip: str) -> None:
         """Stop the drive tool (it stops the rover itself) and send the rover

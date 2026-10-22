@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # Python 3.10
 class Phone:
     host: str = "0.0.0.0"
     port: int = 9099
+    control_port: int = 9102     # localhost HTTP: the dashboard starts and stops the phone's scan
 
 
 @dataclass(frozen=True)

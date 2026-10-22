@@ -2,12 +2,15 @@ import socket
 import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 import pytest
 
 from rover_twin import frames
 from rover_twin.frames import Intrinsics
+from rover_twin.mapper import main as mapper_main
 from rover_twin.phone import protocol, recording
 from rover_twin.phone.protocol import Arrival, Event, Imu, Msg, PhonePose, ProtocolError, RgbdFrame
 from rover_twin.phone.receiver import PhoneLink
@@ -87,6 +90,7 @@ def test_recording_round_trip_tolerates_a_truncated_tail(tmp_path):
     for t, p in [(10.0, b"a"), (10.25, b"bb"), (11.0, b"ccc")]:
         rec.write(Arrival(t, p))
     rec.close()
+    rec.write(Arrival(12.0, b"late"))                # the receiver's last frame, after the mapper stopped
     with open(path, "ab") as fh:
         fh.write(struct.pack("<dI", 1.5, 99) + b"cut")
     with pytest.warns(UserWarning, match="truncated"):
@@ -129,4 +133,24 @@ def test_phone_link_queues_arrivals_and_enables_imu():
         assert protocol.decode(protocol.read_frame(phone, threading.Event())) == Event(Msg.ENABLE_IMU)
         phone.close()
     finally:
+        link.close()
+
+
+def test_the_mapper_control_tells_the_phone_to_start_scanning():
+    link = PhoneLink("127.0.0.1", 0)
+    control = mapper_main.serve_control(link, 0)
+    url = f"http://127.0.0.1:{control.server_address[1]}/scan/start"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as refused:      # no phone yet
+            urllib.request.urlopen(urllib.request.Request(url, b"", method="POST"), timeout=2)
+        assert refused.value.code == 409
+        phone = socket.create_connection(("127.0.0.1", link.port))
+        phone.settimeout(2.0)
+        assert protocol.decode(protocol.read_frame(phone, threading.Event())) == Event(Msg.ENABLE_IMU)
+        with urllib.request.urlopen(urllib.request.Request(url, b"", method="POST"), timeout=2) as response:
+            assert response.status == 200
+        assert protocol.decode(protocol.read_frame(phone, threading.Event())) == Event(Msg.START_SCAN)
+        phone.close()
+    finally:
+        control.shutdown()
         link.close()

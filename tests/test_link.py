@@ -27,7 +27,8 @@ def test_messages_round_trip():
     assert [p.key for p in tiles.patches] == [(-1, 2), (0, 0)]
     np.testing.assert_array_equal(tiles.patches[0].height, patch((-1, 2), 0.25).height)   # NaN = unknown
     np.testing.assert_array_equal(tiles.patches[1].state, patch((0, 0), -0.5).state)
-    assert round_trip(LivePose(7, 12.5, 3.25, Pose2D(1.0, -2.0, 45.0))) == LivePose(7, 12.5, 3.25, Pose2D(1.0, -2.0, 45.0))
+    pose = LivePose(7, 12.5, 3.25, Pose2D(1.0, -2.0, 45.0), 0.031)
+    assert round_trip(pose) == pose
     mesh = Mesh(np.arange(9, dtype=np.float32).reshape(3, 3), np.array([[0, 1, 2]], np.int32),
                 np.full((3, 3), 200, np.uint8))
     got = round_trip(VisualMesh(1.5, mesh)).mesh

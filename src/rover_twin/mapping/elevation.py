@@ -23,10 +23,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage
 
 from rover_twin.config import Elevation
 
 UNKNOWN, OBSERVED, INFERRED = 0, 1, 2
+SPIKE_NEIGHBOURS = 5     # observed of a cell's 8 before it can be judged a lone spike
 
 Key = tuple[int, int]
 
@@ -80,15 +82,22 @@ class ElevationGrid:
             return None
         return float(np.float32(np.median(h[observed])))   # as stored
 
-    def infer_footprint(self, center_xy) -> set[Key]:
+    def infer_footprint(self, center_xy, fallback_z: float | None = None) -> set[Key]:
         """Fill the never-seen cells under the rover's footprint with the
         ground around it, marked inferred. The camera never sees the ground
-        the rover stands on, wherever it is."""
+        the rover stands on, wherever it is. Until the ring around it is seen
+        (a camera looking ahead does not see it from where the rover starts),
+        ``fallback_z``, the ground the rover is known to stand on, fills the
+        cells still unknown, so the rover can turn in place to look around."""
         height = self.ground(center_xy)
-        if height is None:
-            return set()
         cells, dist, h, state = self._around(center_xy)
-        fill = (dist <= self.cfg.footprint_radius_m) & ((state == UNKNOWN) | ((state == INFERRED) & (h != height)))
+        inside = dist <= self.cfg.footprint_radius_m
+        if height is not None:
+            fill = inside & ((state == UNKNOWN) | ((state == INFERRED) & (h != height)))
+        elif fallback_z is not None:
+            height, fill = float(np.float32(fallback_z)), inside & (state == UNKNOWN)
+        else:
+            return set()
         return self._set(cells[fill], np.full(fill.sum(), height), np.zeros(fill.sum()), np.full(fill.sum(), INFERRED))
 
     def _around(self, center_xy):
@@ -105,11 +114,15 @@ class ElevationGrid:
     def patch(self, key: Key) -> tuple[np.ndarray, np.ndarray]:
         """Collider patch of a tile: its cells plus the first row and column of
         its +x / +y neighbours, so adjacent patches share their edge vertices.
-        Returns ((n+1, n+1) heights, NaN where unknown; (n+1, n+1) states)."""
+        Returns ((n+1, n+1) heights, NaN where unknown; (n+1, n+1) states).
+        A lone spike is lowered to its neighbours (see :func:`_despeckle`)."""
         k = self.n + 1
-        cells = np.asarray(key) * self.n + np.stack(np.mgrid[0:k, 0:k], -1).reshape(-1, 2)
+        # One cell more all round, so every cell is judged against all its neighbours.
+        cells = np.asarray(key) * self.n - 1 + np.stack(np.mgrid[0:k + 2, 0:k + 2], -1).reshape(-1, 2)
         h, _, state = self._get(cells)
-        return np.where(state == UNKNOWN, np.nan, h).reshape(k, k).astype(np.float32), state.reshape(k, k)
+        h = _despeckle(h.reshape(k + 2, k + 2), state.reshape(k + 2, k + 2), self.cfg.step_m)[1:-1, 1:-1]
+        state = state.reshape(k + 2, k + 2)[1:-1, 1:-1]
+        return np.where(state == UNKNOWN, np.nan, h).astype(np.float32), state
 
     def points(self, state: int = OBSERVED) -> np.ndarray:
         """Cell centres (x, y, height) of every cell in ``state``."""
@@ -186,3 +199,17 @@ def _group(keys: np.ndarray):
     for start, end in zip(starts, np.r_[starts[1:], len(order)]):
         tx, ty = _unpack(sorted_[start:start + 1])[0]
         yield (int(tx), int(ty)), order[start:end]
+
+
+def _despeckle(h: np.ndarray, state: np.ndarray, step: float) -> np.ndarray:
+    """Heights with each lone spike lowered to its highest neighbour: an
+    observed cell more than ``step`` above every observed one of its 8 (and
+    most of them observed). One cell is narrower than anything the rover meets
+    and than the depth can resolve; a stray reading is not, and in physics it
+    is a jolt and to validation an obstacle. Anything two cells wide is kept."""
+    observed = state == OBSERVED
+    ring = np.ones((3, 3), bool)
+    ring[1, 1] = False
+    highest = ndimage.maximum_filter(np.where(observed, h, -np.inf), footprint=ring, mode="constant", cval=-np.inf)
+    count = ndimage.convolve(observed.astype(np.int32), ring.astype(np.int32), mode="constant")
+    return np.where(observed & (count >= SPIKE_NEIGHBOURS) & (h > highest + step), highest, h)

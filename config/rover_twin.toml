@@ -16,7 +16,9 @@ forward_axis = "-y"         # the RASSOR drives along its body -Y
 # driving direction, 0.10 m ahead of the rover centre and 0.355 m above the
 # ground under it (measured: the floor is 35.2-35.7 cm below the camera in
 # both lab recordings), so the floor at the start is z = 0 and map heights
-# are heights above the floor.
+# are heights above the floor. Only the camera's heading on the rover comes
+# from the quaternion: its tilt and roll are measured when the map anchors,
+# with the rover standing level, so the phone may point down at the floor.
 translation_m = [0.0, -0.10, 0.355]
 quaternion_wxyz = [0.0, 0.0, 0.7071067811865475, 0.7071067811865476]
 

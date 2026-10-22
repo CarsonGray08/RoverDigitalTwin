@@ -73,6 +73,9 @@ version = "6.0.0"
 settings.persistent = false        # settings reset on each run with this app
 window.title = "Isaac Sim Python (Newton Physics)"
 vulkan = true                      # Explicitly enable Vulkan
+# Draw from Fabric, where Newton writes body poses (it never writes USD): without
+# it the viewport shows the rover where it was loaded. The full Newton app sets it too.
+useFabricSceneDelegate = true
 enableDeveloperWarnings = false    # disable developer warnings to reduce log noise
 
 [settings.app.exts.folders]

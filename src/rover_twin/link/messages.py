@@ -32,7 +32,7 @@ from rover_twin.phone.protocol import LENGTH, ProtocolError
 _HEADER = struct.Struct("<4sBB")
 _TILES = struct.Struct("<QdBdII")
 _KEY = struct.Struct("<ii")
-_POSE = struct.Struct("<Qdd3d")
+_POSE = struct.Struct("<Qdd4d")
 _MESH = struct.Struct("<dII")
 MAGIC, VERSION = b"RTLK", 1
 
@@ -66,6 +66,7 @@ class LivePose:
     t_arrival: float
     t_phone: float
     pose: Pose2D
+    z_m: float = 0.0        # the ground under the rover, from the phone's pose
 
 
 @dataclass(frozen=True, eq=False)
@@ -86,7 +87,8 @@ def encode(message: Message) -> bytes:
         kind, body = Kind.TILES, b"".join(parts)
     elif isinstance(message, LivePose):
         p = message.pose
-        kind, body = Kind.POSE, _POSE.pack(message.rev, message.t_arrival, message.t_phone, p.x, p.y, p.yaw_deg)
+        kind, body = Kind.POSE, _POSE.pack(message.rev, message.t_arrival, message.t_phone, p.x, p.y, p.yaw_deg,
+                                           message.z_m)
     else:
         m = message.mesh
         kind = Kind.MESH
@@ -102,8 +104,8 @@ def decode(payload: bytes) -> Message:
         raise ProtocolError("not a link message")
     at = _HEADER.size
     if kind == Kind.POSE:
-        rev, t, t_phone, x, y, yaw = _POSE.unpack_from(payload, at)
-        return LivePose(rev, t, t_phone, Pose2D(x, y, yaw))
+        rev, t, t_phone, x, y, yaw, z = _POSE.unpack_from(payload, at)
+        return LivePose(rev, t, t_phone, Pose2D(x, y, yaw), z)
     if kind == Kind.TILES:
         rev, t, reset, cell_m, n, count = _TILES.unpack_from(payload, at)
         at += _TILES.size

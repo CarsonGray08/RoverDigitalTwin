@@ -5,10 +5,15 @@ Run commands from the repository root on the [configured workstation](setup.md).
 ## Start and drive
 
 1. Run `./scripts/dashboard.sh` and open the printed URL.
-2. Press **Start mapper and twin**. Connect LiveScanner to the workstation IP.
-3. Hold the rover still until the map anchors, then use **360° scan** and
-   **Rehearse & drive**. Motion is rehearsed only until the arm switch is on
-   and a rover IP is set. **STOP** stops the rover.
+2. Press **Start mapper and twin**. Connect LiveScanner to the workstation IP
+   and mount the phone on the rover.
+3. Press **360° scan**: it starts the phone scanning, waits for the map to
+   anchor (the rover must hold still for a second; the map anchors only once
+   the phone is scanning, so it can be handled before that), then turns. The
+   scan's turns are not rehearsed on the twin; the live pose still stops each.
+   Starting the scan on the phone itself works too, once the phone is mounted.
+   Then use **Rehearse & drive**. Motion is rehearsed only until the arm
+   switch is on and a rover IP is set. **STOP** stops the rover.
 
 `./scripts/rover_twin.sh` starts mapper and twin without the dashboard; Ctrl-C
 stops both. The arm switch resets on page load.

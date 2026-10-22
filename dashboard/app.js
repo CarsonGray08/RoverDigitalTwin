@@ -9,6 +9,7 @@ let rover = null;                     // /health's rover: footprint and units
 let grid = null;                      // the last /map, drawn into an offscreen canvas
 let mapVersion = null, mapFetchedAt = 0, mapLoading = false;
 let status = null;
+let motionWasRunning = false;         // to say how a scan or drive ended
 
 /* ---------- helpers ---------- */
 
@@ -153,6 +154,12 @@ function render(s) {
   $("scan-start").disabled = $("drive-start").disabled = s.motion_job.running || !obs;
   setLog($("twin-log"), s.twin_job.log);
   setLog($("motion-log"), s.motion_job.log);
+  if (motionWasRunning && !s.motion_job.running) {
+    const last = s.motion_job.log[s.motion_job.log.length - 1] || "finished";
+    const failed = s.motion_job.returncode !== 0 || /stopped:|refused/.test(last);
+    toast(last, failed ? "err" : "ok", failed ? 10000 : 4000);
+  }
+  motionWasRunning = s.motion_job.running;
   if (obs) refreshMap(live ? live.rev : obs.terrain_tiles);
   drawMap(live);
 }
@@ -181,7 +188,8 @@ function wire() {
   }));
   $("scan-start").addEventListener("click", (e) => withButton(e.target, async () => {
     await post("/api/motion/start", motionBody({ kind: "scan" }));
-    toast(armed() ? "360 scan: the rover turns" : "360 scan rehearsed only", "ok");
+    toast(armed() ? "360 scan: phone scanning, the rover turns once the map anchors"
+                  : "360 scan: phone scanning; disarmed, the rover does not turn", "ok");
   }));
   $("drive-start").addEventListener("click", (e) => withButton(e.target, async () => {
     await post("/api/motion/start", motionBody({ kind: "drive", command: $("drive-command").value,

@@ -21,6 +21,19 @@ over "Environment"
     over "CollisionProxy" (active = false)
     {
     }
+
+    # The sun alone pointed straight down: lit tops, black walls. Tilted, with
+    # a dome for fill, the scanned mesh reads from any side.
+    over "defaultLight"
+    {
+        quatd xformOp:orient = (0.9238795, 0.3826834, 0, 0)
+    }
+
+    def DomeLight "AmbientLight"
+    {
+        float inputs:intensity = 100
+        float inputs:exposure = 0
+    }
 }
 
 over "World"
