@@ -12,7 +12,10 @@ where the rover ends up matters. Before every command, the rest of the plan is
 rehearsed from the rover's live pose on the latest map, and a refusal stops
 the drive there: that is the moment for the software that wrote the plan to
 replan. A command is sent as a bounded step count (ops/rover.py) and stopped
-when the live pose says it is done; the rover is stopped on finish, on any
+when the live pose says it is done. Wheel slip can spend those steps short of
+the target (the firmware then stops by itself), so a rover that stops early
+is sent the command's steps again, as often as it keeps making progress;
+one that makes none after that is stuck. The rover is stopped on finish, on any
 failure (including a fault the rover reports, or a live pose that is late or
 lost), and on Ctrl-C. Without ``--arm`` nothing moves: the plan is only
 rehearsed. A plan with ``"rehearse": false`` is flown without asking the twin
@@ -40,7 +43,8 @@ from rover_twin.ops.rover import Rover, steps
 POLL_S = 0.1
 POSE_MAX_AGE_S = 1.0                  # an older live pose is not driven on
 STOP_SHORT_M, STOP_SHORT_DEG = 0.01, 1.0     # the rover coasts a little after STOP
-STALL_S = 3.0                         # no progress for this long while moving: stuck
+TOP_UP_S = 1.0                        # no progress for this long: its steps may be spent, send them again
+STALL_S = 3.0                         # no progress for this long after that: stuck
 TIMEOUT_S = 120.0                     # one command, however slow the rover
 SETTLE_S = 0.5                        # after STOP, before the next live pose
 POSE_WAIT_S = 15.0                    # for the first live pose of a scan just starting
@@ -90,7 +94,7 @@ class Driver:
         linear = kind in ("FWD", "REV")
         size = command["distance"] / self.twin.rover["distance_units_per_m"] if linear else command["distance"]
         target, moved = (size - STOP_SHORT_M, 0.005) if linear else (size - STOP_SHORT_DEG, 0.5)
-        progress, best, best_t, pose = 0.0, 0.0, t0, start
+        progress, best, best_t, pose, topped_up = 0.0, 0.0, t0, start, False
         self.rover.send(kind, steps(kind, size))
         try:
             while progress < target:
@@ -102,11 +106,15 @@ class Driver:
                 progress = _along(kind, start, pose) if linear else progress + _turned(kind, last, pose)
                 now = self.clock()
                 if progress > best + moved:
-                    best, best_t = progress, now
+                    best, best_t, topped_up = progress, now, False
                 if (fault := self.rover.fault()) is not None:
                     return f"the rover reported a fault ({fault})", pose, now - t0
-                if now - best_t > STALL_S:
-                    return f"no progress for {STALL_S:.0f} s ({progress:.3f} of {target:.3f})", pose, now - t0
+                if not topped_up and now - best_t > TOP_UP_S:
+                    self.rover.send(kind, steps(kind, size))
+                    best_t, topped_up = now, True
+                elif topped_up and now - best_t > STALL_S:
+                    return (f"no progress for {STALL_S:.0f} s after its steps were sent again "
+                            f"({progress:.3f} of {target:.3f})"), pose, now - t0
                 if now - t0 > TIMEOUT_S:
                     return f"timed out after {TIMEOUT_S:.0f} s", pose, now - t0
         finally:

@@ -108,3 +108,38 @@ def test_a_drive_stops_where_the_twin_or_the_rover_says_so(twin, tmp_path):
     lost = Driver(twin, rover, tmp_path / "log.jsonl", pose=pose, clock=lambda: rover.t,
                   sleep=rover.sleep).run([twin.forward(0.5)])
     assert not lost.completed and "lost the live pose" in lost.reason and rover.sent[-1] == "STOP"
+
+
+class Slipping(FakeRover):
+    """A rover whose firmware stops by itself once the steps it was sent are
+    spent, on wheels that slip: each degree costs ``steps_per_deg`` steps."""
+
+    def __init__(self, steps_per_deg):
+        super().__init__()
+        self.steps_per_deg, self.budget_deg, self.steps = steps_per_deg, 0.0, []
+
+    def send(self, command, step_count=0):
+        super().send(command, step_count)
+        self.steps.append(step_count)
+        self.budget_deg = step_count / self.steps_per_deg if self.steps_per_deg else 0.0
+
+    def sleep(self, s):
+        turned = min(3.0 * s, self.budget_deg) if self.twist[1] else 0.0
+        self.budget_deg -= turned
+        x, y, yaw = self.pose
+        self.pose, self.t = (x, y, yaw + self.twist[1] * turned), self.t + s
+
+
+def test_a_turn_whose_steps_run_out_is_sent_them_again(twin, tmp_path):
+    rover = Slipping(steps_per_deg=430)       # smooth wheels: a 90 deg turn's steps reach about 70 deg
+    outcome = drive(twin, rover, tmp_path, [twin.left(90)] * 2)
+    assert outcome.completed, outcome.reason
+    assert rover.pose[2] == pytest.approx(180.0, abs=3.0)
+    assert rover.sent.count("LEFT") == 4      # each turn topped up once
+
+
+def test_a_rover_that_stays_put_after_its_steps_again_is_stuck(twin, tmp_path):
+    rover = Slipping(steps_per_deg=0)         # wheels spinning, or blocked: it never turns
+    outcome = drive(twin, rover, tmp_path, [twin.left(90)])
+    assert not outcome.completed and "no progress" in outcome.reason
+    assert rover.sent.count("LEFT") == 2 and rover.sent[-1] == "STOP"     # one top-up, then given up
