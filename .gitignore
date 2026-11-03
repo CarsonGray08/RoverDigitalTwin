@@ -10,8 +10,9 @@ dist/
 runs/
 *.scanlog
 
-# Local credentials
+# Local credentials and this workstation's paths (from config/system.env.example)
 .env
+config/system.env
 
 # Platform build products
 ios/LiveScanner/.theos/

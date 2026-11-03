@@ -34,7 +34,7 @@ from rover_twin.ops.rover import Rover, RoverError
 
 REPO = Path(__file__).resolve().parents[3]
 STATIC = REPO / "dashboard"
-STATE = Path(os.environ.get("DASHBOARD_STATE_DIR", "/tmp/rover_twin_dashboard"))
+STATE = Path(os.environ.get("DASHBOARD_STATE_DIR", f"/tmp/rover_twin_dashboard-{os.getuid()}"))  # per account
 SPEED = 30                                   # the twin's command speed; the real rover's is --level
 SCAN = [{"command": "LEFT", "speed": SPEED, "distance": 90}] * 4    # rehearsed a quarter at a time
 COMMANDS = ("FWD", "REV", "LEFT", "RIGHT")

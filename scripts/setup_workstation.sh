@@ -47,7 +47,8 @@ DRIVER="${GPU##*, }"
 [ "${DRIVER%%.*}" -ge "$MIN_DRIVER" ] || die "driver $DRIVER is too old for CUDA 12.8; install $MIN_DRIVER or newer"
 echo "Ubuntu $VERSION_ID, $GPU"
 
-ISAAC="${1:-$(sed -n 's/^ISAAC_SIM_ROOT=//p' "$ENV_FILE")}"
+[ -f "$ENV_FILE" ] || cp config/system.env.example "$ENV_FILE"
+ISAAC="${1:-$(set -a; . "$ENV_FILE"; printf '%s' "${ISAAC_SIM_ROOT:-}")}"
 [ -x "$ISAAC/python.sh" ] || die "no Isaac Sim at '$ISAAC': install Isaac Sim 6 and pass its folder"
 
 missing=()

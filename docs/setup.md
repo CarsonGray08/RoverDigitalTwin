@@ -7,11 +7,13 @@ For an already configured workstation, go straight to [operations](operations.md
 Ubuntu 22.04 or 24.04, NVIDIA GPU, driver 570+, and Isaac Sim 6 installed:
 
 ```bash
-scripts/setup_workstation.sh ~/isaac-sim-6.0.0
+scripts/setup_workstation.sh [ISAAC_SIM_ROOT]
 ```
 
-The script installs mapper dependencies, builds `.venv`, writes workstation
-paths to `config/system.env`, and checks nvblox, Isaac's Python and tests.
+Without an argument it uses `~/isaacsim/_build/linux-x86_64/release`. The
+script installs mapper dependencies, builds `.venv`, writes this account's
+paths to `config/system.env` (copied from `config/system.env.example`, and
+ignored by git), and checks nvblox, Isaac's Python and tests.
 If the lab recordings are present, it also checks replay against the reference
 map. Set `ROVER_IP` in `config/system.env`. Runtime settings are in
 `config/rover_twin.toml`.

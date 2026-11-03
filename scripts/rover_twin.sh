@@ -6,10 +6,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"               # paths in the config are relative to the repo
+[ -f config/system.env ] || cp config/system.env.example config/system.env
 set -a
-source "${DT_CONFIG:-config/system.env}"     # host paths: ISAAC_SIM_ROOT
+source "${DT_CONFIG:-config/system.env}"     # host paths: ISAAC_SIM_ROOT, MAPPER_PYTHON
+MAPPER_PYTHON="${MAPPER_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 set +a
 : "${ISAAC_SIM_ROOT:?set ISAAC_SIM_ROOT in config/system.env}"
+[ -x "$ISAAC_SIM_ROOT/python.sh" ] || { echo "[rover-twin] no Isaac Sim at '$ISAAC_SIM_ROOT': set ISAAC_SIM_ROOT in config/system.env" >&2; exit 1; }
+# The mapper exiting stops the twin too, so catch a Python without its GPU packages here.
+"$MAPPER_PYTHON" -c "import importlib.util as u, sys; sys.exit(not (u.find_spec('torch') and u.find_spec('nvblox_torch')))" 2>/dev/null \
+  || { echo "[rover-twin] '$MAPPER_PYTHON' lacks torch or nvblox_torch: run scripts/setup_workstation.sh" >&2; exit 1; }
 CONFIG="${RT_CONFIG:-config/rover_twin.toml}"
 RUN_DIR="runs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
@@ -20,7 +26,7 @@ cp "$SCRIPT_DIR/isaacsim.exp.base.python.newton.kit" "$NEWTON_KIT"
 export PYTHONPATH="$PROJECT_ROOT/src"        # not ROS's: it breaks Isaac's Python
 
 echo "[rover-twin] run: $RUN_DIR"
-"${MAPPER_PYTHON:-python3}" -m rover_twin.mapper.main --config "$CONFIG" --run-dir "$RUN_DIR" "$@" &
+"$MAPPER_PYTHON" -m rover_twin.mapper.main --config "$CONFIG" --run-dir "$RUN_DIR" "$@" &
 MAPPER_PID=$!
 "$ISAAC_SIM_ROOT/python.sh" -m rover_twin.twin.main --config "$CONFIG" --run-dir "$RUN_DIR" \
   --experience "$NEWTON_KIT" &
