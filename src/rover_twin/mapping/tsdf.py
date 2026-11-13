@@ -25,6 +25,14 @@ class Mesh:
     def empty() -> "Mesh":
         return Mesh(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32), np.zeros((0, 3), np.uint8))
 
+    def keep(self, faces: np.ndarray) -> "Mesh":
+        """Only the faces where ``faces`` (M,) is true, and the vertices they use."""
+        if faces.all():
+            return self
+        kept = self.faces[faces]
+        used, inverse = np.unique(kept, return_inverse=True)
+        return Mesh(self.vertices[used], inverse.reshape(-1, 3).astype(np.int32), self.colors[used])
+
 
 class Tsdf(Protocol):
     def integrate(self, depth: np.ndarray, intrinsics: Intrinsics, T_W_C: np.ndarray, jpeg: bytes,

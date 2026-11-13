@@ -53,6 +53,9 @@ class Msg(IntEnum):
     IMU = 12
     ENABLE_IMU = 13   # host -> phone
     DISABLE_IMU = 14  # host -> phone
+    RESET_TRACKING = 15   # host -> phone: restart ARKit's tracking
+    TRACKING_RESET = 16   # phone: ARKit restarted; later poses are in a new ARKit world
+    CLEAR_MAP = 17        # host, into the phone stream: forget the map, keep the anchor
 
 
 class ProtocolError(ValueError):

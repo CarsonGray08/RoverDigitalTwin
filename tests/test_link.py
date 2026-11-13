@@ -66,9 +66,9 @@ def test_a_twin_connecting_mid_run_gets_the_map_the_mapper_holds(scan, tmp_path)
                 terrain.clear()
             terrain.update(update.patches)
             pose = update.pose or pose
-        assert set(terrain) == set(mapper.grid.tiles)
+        assert set(terrain) == set(mapper._terrain().tiles)     # the ground, and any obstacle over it
         for key, p in terrain.items():
-            np.testing.assert_array_equal(p.height, mapper.grid.patch(key)[0])
+            np.testing.assert_array_equal(p.height, mapper._patch(key)[0])
         assert pose.rev == mapper.rev
     finally:
         client.close()

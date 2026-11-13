@@ -4,12 +4,16 @@ const $ = (id) => document.getElementById(id);
 const STORE = { "rover-ip": "rt_rover_ip", "level": "rt_level", "drive-command": "rt_command", "drive-amount": "rt_amount" };
 const MAP_REFRESH_MS = 2000;          // at most this often, and only when the map changed
 const POSE_STALE_S = 1.0;             // the drive tool's own limit
+const VIEW_REFRESH_MS = 200;          // the twin captures its view at 5 Hz by default
+const VIEW_STALE_S = 2.0;
+const VIEWS = { camera: "/api/camera", twin: "/api/twin/view" };
 
 let rover = null;                     // /health's rover: footprint and units
 let grid = null;                      // the last /map, drawn into an offscreen canvas
 let mapVersion = null, mapFetchedAt = 0, mapLoading = false;
 let status = null;
 let motionWasRunning = false;         // to say how a scan or drive ended
+let cameraTurns = Number(localStorage.getItem("rt_camera_turns")) || 0;   // quarter turns clockwise
 
 /* ---------- helpers ---------- */
 
@@ -95,7 +99,8 @@ async function refreshMap(version) {
   try {
     const m = await api("/api/map");
     mapFetchedAt = Date.now();
-    if (m.shape[0] > 0) { grid = buildGrid(m) || grid; mapVersion = version; }
+    grid = m.shape[0] > 0 ? buildGrid(m) : null;          // null once the map is cleared
+    mapVersion = version;
   } catch (_) { /* the twin is down or busy; the next poll tries again */ }
   finally { mapLoading = false; }
 }
@@ -126,6 +131,51 @@ function drawMap(live) {
   ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
 }
 
+/* ---------- live views ---------- */
+
+function drawView(name, bitmap) {
+  const canvas = $(`${name}-view`);
+  const turns = name === "camera" ? cameraTurns : 0;
+  const sideways = turns % 2 === 1;
+  canvas.width = sideways ? bitmap.height : bitmap.width;
+  canvas.height = sideways ? bitmap.width : bitmap.height;
+  const ctx = canvas.getContext("2d");
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(turns * Math.PI / 2);
+  ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+}
+
+function showViewAge(name, age) {
+  const el = $(`${name}-age`);
+  el.textContent = age === null ? "" : `${fmt(age, 1)} s old`;
+  el.classList.toggle("stale", age !== null && age > VIEW_STALE_S);
+}
+
+// One request at a time per view, while mapper and twin run and the page is visible.
+async function refreshView(name) {
+  const started = Date.now();
+  let shown = false;
+  try {
+    if (document.hidden) return;
+    if (status && (status.twin_job.running || status.observation)) {
+      const response = await fetch(VIEWS[name], { cache: "no-store" });
+      if (response.ok) {
+        const age = Number(response.headers.get("X-Age-S"));
+        const bitmap = await createImageBitmap(await response.blob());
+        drawView(name, bitmap);
+        bitmap.close();
+        showViewAge(name, isFinite(age) ? age : null);
+        shown = true;
+      }
+    }
+    if (!shown) showViewAge(name, null);
+    $(`${name}-empty`).style.display = shown ? "none" : "flex";
+  } catch (_) { /* the mapper or twin is starting or gone; the next try shows it */ }
+  finally {
+    setTimeout(() => refreshView(name), Math.max(0, VIEW_REFRESH_MS - (Date.now() - started)));
+  }
+}
+
 /* ---------- status ---------- */
 
 const pill = (label, cls = "") => `<span class="pill ${cls}"><span class="dot"></span>${label}</span>`;
@@ -152,6 +202,7 @@ function render(s) {
   $("twin-start").disabled = s.twin_job.running;
   $("twin-stop").disabled = !s.twin_job.running;
   $("scan-start").disabled = $("drive-start").disabled = s.motion_job.running || !obs;
+  $("map-clear").disabled = $("tracking-reset").disabled = s.motion_job.running || !(obs && obs.mapper_connected);
   setLog($("twin-log"), s.twin_job.log);
   setLog($("motion-log"), s.motion_job.log);
   if (motionWasRunning && !s.motion_job.running) {
@@ -196,6 +247,15 @@ function wire() {
                                                  amount: Number($("drive-amount").value) }));
     toast(armed() ? "Driving: rehearsed first, stopped on the live pose" : "Rehearsing only", "ok");
   }));
+  $("map-clear").addEventListener("click", (e) => withButton(e.target, async () => {
+    await post("/api/map/clear"); grid = null; mapVersion = null;
+    toast("Map cleared: it grows again as the phone looks around", "ok");
+  }));
+  $("tracking-reset").addEventListener("click", (e) => withButton(e.target, async () => {
+    if (!confirm("Restart the phone's tracking? The map is cleared, and the rover becomes the start pose once it holds still.")) return;
+    await post("/api/tracking/reset"); grid = null; mapVersion = null;
+    toast("Tracking reset sent: hold the rover still until the live pose comes back", "ok", 8000);
+  }));
   $("motion-stop").addEventListener("click", (e) => withButton(e.target, async () => {
     await post("/api/motion/stop", { rover_ip: $("rover-ip").value.trim() }); toast("STOP sent", "ok");
   }));
@@ -211,8 +271,13 @@ function wire() {
     if (saved !== null) $(id).value = saved;
     $(id).addEventListener("change", () => localStorage.setItem(key, $(id).value));
   }
+  $("camera-rotate").addEventListener("click", () => {
+    cameraTurns = (cameraTurns + 1) % 4;
+    localStorage.setItem("rt_camera_turns", String(cameraTurns));
+  });
   window.addEventListener("resize", () => status && drawMap(status.observation && status.observation.live_pose));
 }
 
 wire();
 poll();
+Object.keys(VIEWS).forEach(refreshView);

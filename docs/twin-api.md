@@ -1,7 +1,8 @@
 # Twin API
 
 Reference for student software and coding assistants. Base URL on the lab
-workstation: `http://127.0.0.1:8765`. All endpoints use JSON.
+workstation: `http://127.0.0.1:8765`. All endpoints use JSON, except the
+`/view.jpg` image.
 
 The offline twin serves the same API on a saved map, using kinematic motion:
 
@@ -94,8 +95,15 @@ Returns `live_pose` (null offline/before tracking), `rover_pose`,
 `rev` and `age_s`. Treat age over ~1 s as unavailable. Limited ARKit tracking
 stops pose updates, so its age grows.
 
+### `GET /view.jpg`
+
+The lab twin's 3D view as a JPEG (the dashboard shows it), captured at
+`twin.view_hz` (5 Hz by default; 0 turns it off), with its age in seconds in
+the `X-Age-S` header. Returns 404 JSON when the view is off, not yet captured,
+or on the offline twin.
+
 `/map` and `/validate_plan` queue in the simulation loop; the map stays fixed
-during a rehearsal. `/health` and `/observation` answer without waiting for it.
+during a rehearsal. `/health`, `/observation` and `/view.jpg` answer without waiting for it.
 
 ## Python and real execution
 

@@ -23,7 +23,8 @@ import urllib.request
 STEPS_PER_M = 23000.0                 # measured, at level 1 (~800 steps/s, 0.035 m/s)
 STEPS_PER_DEG = 24000.0 / 90.0        # ~2x the real turn (a 180 deg trial turned 174 deg on 24107)
 HEADROOM = 1.25                       # steps sent beyond the target; the pose stops the rover first
-MAX_STEPS = 65535                     # uint16 in the serial packet
+TURN_HEADROOM = 2.5                   # smooth wheels slip in a turn: 90 deg took ~36000 steps, not 24000
+MAX_STEPS = 32767                     # the controller publishes an Int16MultiArray; more is a 500
 FAULTS = ("timeout", "exception", "missing", "invalid")
 
 
@@ -32,8 +33,11 @@ class RoverError(RuntimeError):
 
 
 def steps(command: str, metres_or_degrees: float) -> int:
-    per = STEPS_PER_M if command in ("FWD", "REV") else STEPS_PER_DEG
-    return int(min(MAX_STEPS, round(HEADROOM * abs(metres_or_degrees) * per)))
+    if command in ("FWD", "REV"):
+        per, headroom = STEPS_PER_M, HEADROOM
+    else:
+        per, headroom = STEPS_PER_DEG, TURN_HEADROOM
+    return int(min(MAX_STEPS, round(headroom * abs(metres_or_degrees) * per)))
 
 
 class Rover:

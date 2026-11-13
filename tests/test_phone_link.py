@@ -154,3 +154,48 @@ def test_the_mapper_control_tells_the_phone_to_start_scanning():
     finally:
         control.shutdown()
         link.close()
+
+
+def test_the_mapper_control_resets_tracking_on_the_phone_and_clears_the_map_in_the_stream(tmp_path):
+    recorder = recording.Recorder(tmp_path / "phone.scanlog")
+    link = PhoneLink("127.0.0.1", 0, recorder)
+    control = mapper_main.serve_control(link, 0)
+    base = f"http://127.0.0.1:{control.server_address[1]}"
+
+    def post(path):
+        with urllib.request.urlopen(urllib.request.Request(base + path, b"", method="POST"), timeout=2) as response:
+            return response.status
+
+    try:
+        assert post("/map/clear") == 200                      # no phone needed: it is the mapper's own map
+        assert protocol.decode(next(iter(link)).payload) == Event(Msg.CLEAR_MAP)
+        phone = socket.create_connection(("127.0.0.1", link.port))
+        phone.settimeout(2.0)
+        assert protocol.decode(protocol.read_frame(phone, threading.Event())) == Event(Msg.ENABLE_IMU)
+        assert post("/tracking/reset") == 200
+        assert protocol.decode(protocol.read_frame(phone, threading.Event())) == Event(Msg.RESET_TRACKING)
+        phone.close()
+    finally:
+        control.shutdown()
+        link.close()
+        recorder.close()
+    recorded = [protocol.decode(p) for _, p in recording.read(tmp_path / "phone.scanlog")]
+    assert recorded == [Event(Msg.CLEAR_MAP)]                 # a replay clears the map where it was cleared
+
+
+def test_the_mapper_control_serves_the_latest_colour_image():
+    link = PhoneLink("127.0.0.1", 0)
+    image = None
+    control = mapper_main.serve_control(link, 0, lambda: image)
+    url = f"http://127.0.0.1:{control.server_address[1]}/camera.jpg"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as missing:          # nothing streamed yet
+            urllib.request.urlopen(url, timeout=2)
+        assert missing.value.code == 404
+        image = (b"\xff\xd8jpeg", time.monotonic() - 0.5)
+        with urllib.request.urlopen(url, timeout=2) as response:
+            assert response.read() == b"\xff\xd8jpeg" and response.headers["Content-Type"] == "image/jpeg"
+            assert 0.5 <= float(response.headers["X-Age-S"]) < 2.0
+    finally:
+        control.shutdown()
+        link.close()

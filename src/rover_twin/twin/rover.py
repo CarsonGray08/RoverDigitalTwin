@@ -10,7 +10,9 @@ material, Newton actuator gains) is used as authored.
 
 Two rovers are on the stage. The physics rover (``twin.rover_prim``) is shown
 only while it rolls a plan out; a :class:`Ghost`, the same look with no
-physics, always stands at the real rover's live pose.
+physics, always stands at the real rover's live pose. The operator's view
+looks through the ghost's copy of a camera on the rover (``twin.camera``), so
+it follows the real rover; a rehearsal drives off from there.
 
 The viewport draws from
 Fabric; Newton's own copy there (its world matrices) only survives a full app
@@ -98,6 +100,17 @@ class IsaacRover:
         self._forward_deg = math.degrees(math.atan2(forward[1], forward[0]))
         self.steps_per_second = 1.0 / float(self._world.get_physics_dt())
         self._rest_joints = np.asarray(self._art.get_dof_positions().numpy()).reshape(-1).copy()
+
+    def watch(self, camera: str) -> None:
+        """Point the viewport through the ghost's camera of this name."""
+        from omni.kit.viewport.utility import get_active_viewport
+
+        path = self._ghost.camera(camera)
+        viewport = get_active_viewport()
+        if path is None or viewport is None:
+            print(f"twin: no camera {camera!r} on the rover or no viewport; the view stays Isaac's own", flush=True)
+            return
+        viewport.camera_path = path
 
     def step(self) -> None:
         """One physics step, never a render: drawing a frame after the visual
@@ -240,6 +253,7 @@ class Ghost:
         relative = body_world * cache.GetLocalToWorldTransform(rover).GetInverse()   # Gf: row vectors
 
         prim = stage.DefinePrim(path, "Xform")
+        self._prim = prim
         prim.GetReferences().AddInternalReference(rover.GetPath())
         for p in Usd.PrimRange(prim):
             if p.IsA(UsdPhysics.Joint) or p.GetTypeName() == "NewtonActuator":
@@ -256,6 +270,13 @@ class Ghost:
         self._root_from_body = relative.GetInverse()
         self._parent_inv = cache.GetLocalToWorldTransform(prim.GetParent()).GetInverse()
         self._scale = [body_world.GetRow3(i).GetLength() for i in range(3)]
+
+    def camera(self, name: str) -> str | None:
+        """The path of the ghost's camera of this name, if it has one."""
+        from pxr import Usd, UsdGeom
+
+        return next((str(p.GetPath()) for p in Usd.PrimRange(self._prim)
+                     if p.IsA(UsdGeom.Camera) and p.GetName() == name), None) if name else None
 
     def place(self, position, orientation_wxyz) -> None:
         """Put the root body at this world pose (as set_world_poses takes it)."""

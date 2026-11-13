@@ -15,8 +15,8 @@ cd ios/LiveScanner
 make package
 ```
 
-Install the IPA from `packages/` using Dadoum/Sideloader, an Apple ID and an
-Anisette server. Enable iPhone Developer Mode and trust the developer
+Install the IPA from `packages/` with a sideloading tool such as iLoader and
+an Apple ID. Enable iPhone Developer Mode and trust the developer
 certificate. Free-account installs expire after about seven days and need
 re-signing.
 

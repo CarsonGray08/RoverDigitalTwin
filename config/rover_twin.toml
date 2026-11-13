@@ -25,3 +25,8 @@ quaternion_wxyz = [0.0, 0.0, 0.7071067811865475, 0.7071067811865476]
 [run]
 root = "runs"
 record = true
+
+[occupancy]
+# 3D occupancy over the ground (prototype branch): someone who walks past is
+# shown while there and cleared once the camera sees past where they stood.
+enabled = true

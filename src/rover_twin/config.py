@@ -21,7 +21,7 @@ except ModuleNotFoundError:  # Python 3.10
 class Phone:
     host: str = "0.0.0.0"
     port: int = 9099
-    control_port: int = 9102     # localhost HTTP: the dashboard starts and stops the phone's scan
+    control_port: int = 9102     # localhost HTTP: the dashboard's scan control and camera view
 
 
 @dataclass(frozen=True)
@@ -99,10 +99,13 @@ class Odometry:
 
 @dataclass(frozen=True)
 class Keyframes:
-    """A frame joins the re-fuse buffer once the camera moves this far."""
+    """A frame joins the re-fuse buffer once the camera moves this far. Until
+    then, the latest frames of its place are kept with it, this often: a
+    re-fuse replays them after it, so someone who walked away is seen gone."""
 
     min_translation_m: float = 0.2
     min_rotation_deg: float = 10.0
+    recent_s: float = 2.0                # 0: no recent frames
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,31 @@ class Elevation:
 
 
 @dataclass(frozen=True)
+class Occupancy:
+    """3D occupancy of the band the rover's body moves through (mapping/occupancy.py).
+    The band is heights in the twin, from the start floor: flat floors only, for now."""
+
+    enabled: bool = False
+    voxel_m: float = 0.04                # across
+    voxel_z_m: float = 0.08              # vertical resolution, independent of horizontal size
+    z_min_m: float = 0.12                # above a step the rover drives over (rover.max_step_m)
+    z_max_m: float = 1.00                # retain observed seats/tops; collision policy is separate
+    max_range_m: float = 4.0             # voxels farther than this from the camera are not freed
+    hit: float = 0.85                    # log-odds per frame with a point in the voxel
+    miss: float = 0.4                    # per frame that sees past it
+    fade: float = 0.12                   # per frame in view that neither confirms nor refutes it: ~3 s
+    clamp: tuple[float, float] = (-0.8, 3.5)   # free capped low: one hit is occupied again
+    occupied: float = 0.0                # log-odds above this is occupied
+    free_confidence: int = 1             # ARKit confidence a pixel needs to see past a voxel
+    margin_m: float = 0.05               # beyond the voxel's farthest camera-depth corner
+    margin_per_m: float = 0.02           # ... plus this per metre of depth
+
+    def __post_init__(self) -> None:
+        if self.voxel_m <= 0 or self.voxel_z_m <= 0 or self.z_max_m <= self.z_min_m:
+            raise ValueError("occupancy voxel_m must be positive and z_max_m above z_min_m")
+
+
+@dataclass(frozen=True)
 class Link:
     host: str = "127.0.0.1"
     port: int = 9101
@@ -141,6 +169,8 @@ class Twin:
     host: str = "127.0.0.1"           # HTTP API for validation and observation
     port: int = 8765
     gui: bool = True                  # also renders the operator's view at RENDER_HZ
+    view_hz: float = 5.0              # the operator's view captured for the dashboard; 0 is off
+    camera: str = "chase_camera"     # the operator's view: a camera on the rover, at its live pose; "" is Isaac's own
     settle_s: float = 0.3             # after placing the rover, before a rollout (at rest by 0.23 s in Isaac)
     terrain_friction: float = 1.0
 
@@ -164,6 +194,7 @@ class Config:
     keyframes: Keyframes = field(default_factory=Keyframes)
     tsdf: Tsdf = field(default_factory=Tsdf)
     elevation: Elevation = field(default_factory=Elevation)
+    occupancy: Occupancy = field(default_factory=Occupancy)
     link: Link = field(default_factory=Link)
     twin: Twin = field(default_factory=Twin)
     run: Run = field(default_factory=Run)

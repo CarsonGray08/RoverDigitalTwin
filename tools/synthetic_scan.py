@@ -7,7 +7,7 @@ the pose it reports can be given a yaw drift to show the metrics catch it.
 Writes the recording and its ground truth, ``<name>.truth.toml``, in the same
 format a tape-measured benchmark recording uses.
 
-usage: python tools/synthetic_scan.py {spin,drive,loop} OUT.scanlog [--yaw-drift DEG_PER_S]
+usage: python tools/synthetic_scan.py {still,spin,drive,loop} OUT.scanlog [--yaw-drift DEG_PER_S]
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ BOXES = (
     Box("step", (-1.0, -1.5), (0.60, 0.40, 0.12), -35.0),
 )
 
+PERSON = (0.30, 0.30, 1.70)
+
 # The ARKit session started somewhere else: its world is yawed, offset and
 # 0.9 m below the phone's starting height relative to the twin.
 T_W_A_TRUE = frames.rot_z(0.6, (0.4, -0.3, 0.9)) @ M_AXIS
@@ -57,7 +59,9 @@ def knots(kind: str) -> list[tuple[float, float, float, float]]:
     def go(seconds, x, y, yaw):
         path.append((path[-1][0] + seconds, x, y, yaw))
 
-    if kind == "spin":
+    if kind == "still":
+        go(10.0, 0.0, 0.0, 0.0)            # standing, looking ahead
+    elif kind == "spin":
         go(12.0, 0.0, 0.0, 360.0)          # 30 deg/s turn in place
     elif kind == "drive":
         go(6.4, 1.6, 0.0, 0.0)             # 0.25 m/s
@@ -76,14 +80,15 @@ def rover_at(path, t: float) -> Pose2D:
     return Pose2D(*(float(np.interp(t, k[:, 0], k[:, i])) for i in (1, 2, 3)))
 
 
-def render(T_W_C: np.ndarray, intr: Intrinsics, rng, noise_per_m: float, max_range_m: float = 5.0) -> np.ndarray:
-    """Z-depth of the room and boxes seen from ``T_W_C`` (CV axes)."""
+def render(T_W_C: np.ndarray, intr: Intrinsics, rng, noise_per_m: float, max_range_m: float = 5.0,
+           boxes=BOXES) -> np.ndarray:
+    """Z-depth of the room and ``boxes`` seen from ``T_W_C`` (CV axes)."""
     v, u = np.mgrid[0:intr.height, 0:intr.width]
     rays = np.stack([(u - intr.cx) / intr.fx, (v - intr.cy) / intr.fy, np.ones(u.shape)], -1).reshape(-1, 3)
     d = rays @ T_W_C[:3, :3].T     # z component of each camera ray is 1, so t is z-depth
     o = T_W_C[:3, 3]
     t = _slab(o, d, *ROOM)[1]
-    for box in BOXES:
+    for box in boxes:
         R = frames.rot_z(-math.radians(box.yaw_deg))[:3, :3]
         half = np.array([box.size[0] / 2, box.size[1] / 2, box.size[2]])
         near, far = _slab(R @ (o - [*box.center, 0.0]), d @ R.T, -half * [1, 1, 0], half)
@@ -99,9 +104,11 @@ def _slab(o, d, lo, hi):
 
 
 def write(kind: str, path: str | Path, *, yaw_drift_deg_s: float = 0.0, z_drift_m_s: float = 0.0, width: int = 256,
-          rgbd_hz: float = 10.0, noise_per_m: float = 0.01, seed: int = 0, pitch_deg: float = 0.0) -> Path:
+          rgbd_hz: float = 10.0, noise_per_m: float = 0.01, seed: int = 0, pitch_deg: float = 0.0,
+          person: tuple[float, float, float] | None = None) -> Path:
     """Write ``path`` and its truth file; returns the truth file's path.
-    ``pitch_deg`` tilts the phone down on its mount from the configured level."""
+    ``pitch_deg`` tilts the phone down on its mount from the configured level.
+    ``person`` (x, y, leave_s): someone standing there (PERSON) until then."""
     path = Path(path)
     lab = config.load(Path(__file__).parents[1] / "config" / "rover_twin.toml")
     mount = Mount.from_config(lab)
@@ -148,7 +155,9 @@ def write(kind: str, path: str | Path, *, yaw_drift_deg_s: float = 0.0, z_drift_
         if not is_rgbd:
             message = PhonePose(t, T_A_C, protocol.TRACKING_NORMAL)
         else:
-            depth = render(T_W_C, depth_intr, rng, noise_per_m)
+            there = person is not None and t < person[2]
+            boxes = BOXES + (Box("person", person[:2], PERSON, 0.0),) if there else BOXES
+            depth = render(T_W_C, depth_intr, rng, noise_per_m, boxes=boxes)
             message = RgbdFrame(t, T_A_C, depth, np.full(depth.shape, 2, np.uint8), jpeg.getvalue(), color_intr)
         recorder.write(Arrival(t, protocol.encode(message)[protocol.LENGTH.size:]))
     recorder.write(Arrival(end, protocol.encode(Event(Msg.FINALIZE, end))[protocol.LENGTH.size:]))
@@ -158,7 +167,7 @@ def write(kind: str, path: str | Path, *, yaw_drift_deg_s: float = 0.0, z_drift_
     truth = path.with_name(path.stem + ".truth.toml")
     lines = [f'kind = "{kind}"', "", "[end]", f"x_m = {final.x}", f"y_m = {final.y}",
              f"yaw_deg = {frames.wrap_deg(final.yaw_deg)}"]
-    for box in BOXES if kind != "drive" else ():     # a straight drive never faces them all
+    for box in BOXES if kind not in ("drive", "still") else ():     # a straight drive never faces them all
         lines += ["", "[[boxes]]", f'name = "{box.name}"', f"center_m = {list(box.center)}",
                   f"size_m = {list(box.size)}"]
     truth.write_text("\n".join(lines) + "\n")
@@ -167,7 +176,7 @@ def write(kind: str, path: str | Path, *, yaw_drift_deg_s: float = 0.0, z_drift_
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("kind", choices=("spin", "drive", "loop"))
+    parser.add_argument("kind", choices=("still", "spin", "drive", "loop"))
     parser.add_argument("out", type=Path)
     parser.add_argument("--yaw-drift", type=float, default=0.0, help="reported yaw drift, deg/s")
     parser.add_argument("--z-drift", type=float, default=0.0, help="reported height drift, m/s")

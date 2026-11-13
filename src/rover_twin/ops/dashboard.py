@@ -1,5 +1,5 @@
-"""Operator dashboard: start the twin, watch the map and the rover, and run a
-360 scan or a drive, behind an arm switch. The scan's turns are flown on the
+"""Operator dashboard: start the twin, watch the map, the rover, the phone's
+camera and the twin's view, and run a 360 scan or a drive, behind an arm switch. The scan's turns are flown on the
 live pose without the twin's rehearsal; a drive is rehearsed first.
 
     scripts/dashboard.sh                # prints http://<workstation>:8090
@@ -8,7 +8,8 @@ Motion goes through the drive tool (``rover_twin.ops.drive``): every command
 is rehearsed on the live map first and stopped on the live pose, and while
 disarmed the plan is only rehearsed. The page loads disarmed. It listens on
 every interface for the lab network; set APP_USERNAME and APP_PASSWORD
-before exposing it any further.
+before exposing it any further. Through a Cloudflare tunnel, plain HTTP is
+redirected to HTTPS before the login is asked for.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ REPO = Path(__file__).resolve().parents[3]
 STATIC = REPO / "dashboard"
 STATE = Path(os.environ.get("DASHBOARD_STATE_DIR", f"/tmp/rover_twin_dashboard-{os.getuid()}"))  # per account
 SPEED = 30                                   # the twin's command speed; the real rover's is --level
-SCAN = [{"command": "LEFT", "speed": SPEED, "distance": 90}] * 4    # rehearsed a quarter at a time
+SCAN = [{"command": "LEFT", "speed": SPEED, "distance": 45}] * 8    # a smooth-wheel 90 needs more than MAX_STEPS
 COMMANDS = ("FWD", "REV", "LEFT", "RIGHT")
 
 
@@ -112,6 +113,18 @@ class Dashboard:
         except OSError as exc:
             return 502, json.dumps({"error": f"the twin is not answering ({exc})"}).encode()
 
+    def image(self, url: str) -> tuple[int, bytes, str, dict]:
+        """A JPEG from the mapper or the twin with its X-Age-S, or why there is none (JSON)."""
+        try:
+            with urlopen(url, timeout=2.0) as response:
+                age = response.headers.get("X-Age-S")
+                return (response.status, response.read(), response.headers.get("Content-Type", "image/jpeg"),
+                        {"X-Age-S": age} if age else {})
+        except HTTPError as exc:
+            return exc.code, exc.read(), "application/json", {}
+        except OSError as exc:
+            return 502, json.dumps({"error": f"not answering ({exc})"}).encode(), "application/json", {}
+
     def start_twin(self) -> None:
         self.twin.start(["bash", str(REPO / "scripts" / "rover_twin.sh")])
 
@@ -143,12 +156,30 @@ class Dashboard:
 
     def start_phone_scan(self) -> None:
         """Tell the phone, through the mapper, to start scanning (harmless if it already is)."""
-        url = f"http://127.0.0.1:{self.cfg.phone.control_port}/scan/start"
+        self._mapper_control("/scan/start", "start the phone's scan")
+
+    def clear_map(self) -> None:
+        """Forget the map; it grows again from what the phone sees next."""
+        self._idle("clearing the map")
+        self._mapper_control("/map/clear", "clear the map")
+
+    def reset_tracking(self) -> None:
+        """Restart the phone's ARKit tracking; the map is cleared and anchors
+        again, at the start pose, once the rover holds still."""
+        self._idle("resetting the phone's tracking")
+        self._mapper_control("/tracking/reset", "reset the phone's tracking")
+
+    def _idle(self, what: str) -> None:
+        if self.motion.running():
+            raise RuntimeError(f"stop the scan or drive before {what}")
+
+    def _mapper_control(self, path: str, what: str) -> None:
+        url = f"http://127.0.0.1:{self.cfg.phone.control_port}{path}"
         try:
             with urlopen(Request(url, b"", method="POST"), timeout=2.0):
                 pass
         except HTTPError as exc:
-            raise RuntimeError(f"could not start the phone's scan: {exc.read().decode(errors='replace')}") from exc
+            raise RuntimeError(f"could not {what}: {exc.read().decode(errors='replace')}") from exc
         except OSError as exc:
             raise RuntimeError(f"the mapper is not answering ({exc}): start the mapper and twin first") from exc
 
@@ -169,7 +200,7 @@ def serve(dashboard: Dashboard, host: str, port: int) -> ThreadingHTTPServer:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if not self._authorized():
+            if self._insecure() or not self._authorized():
                 return
             path = urlparse(self.path).path
             if path == "/api/status":
@@ -178,11 +209,15 @@ def serve(dashboard: Dashboard, host: str, port: int) -> ThreadingHTTPServer:
                 self._send(*dashboard.twin_get("/health", 2.0), "application/json")
             elif path == "/api/map":                  # waits behind rehearsals, like any /map
                 self._send(*dashboard.twin_get("/map", 30.0), "application/json")
+            elif path == "/api/camera":
+                self._send(*dashboard.image(f"http://127.0.0.1:{dashboard.cfg.phone.control_port}/camera.jpg"))
+            elif path == "/api/twin/view":
+                self._send(*dashboard.image(dashboard.twin_url + "/view.jpg"))
             else:
                 self._static(path)
 
         def do_POST(self) -> None:
-            if not self._authorized():
+            if self._insecure() or not self._authorized():
                 return
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
             actions = {
@@ -190,6 +225,8 @@ def serve(dashboard: Dashboard, host: str, port: int) -> ThreadingHTTPServer:
                 "/api/twin/stop": lambda: threading.Thread(target=dashboard.twin.stop, daemon=True).start(),
                 "/api/motion/start": lambda: dashboard.start_motion(body),
                 "/api/motion/stop": lambda: dashboard.stop_motion(str(body.get("rover_ip") or "").strip()),
+                "/api/map/clear": dashboard.clear_map,
+                "/api/tracking/reset": dashboard.reset_tracking,
             }
             action = actions.get(urlparse(self.path).path)
             if action is None:
@@ -202,6 +239,17 @@ def serve(dashboard: Dashboard, host: str, port: int) -> ThreadingHTTPServer:
                 self._json(400, {"error": str(exc)})
             except RuntimeError as exc:
                 self._json(409, {"error": str(exc)})
+
+        def _insecure(self) -> bool:
+            """Cloudflare's edge says how the browser reached it; plain HTTP goes
+            to HTTPS first, so the login never crosses the internet in clear."""
+            if json.loads(self.headers.get("Cf-Visitor") or "{}").get("scheme") != "http":
+                return False
+            self.send_response(308)
+            self.send_header("Location", f"https://{self.headers.get('Host', '')}{self.path}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
 
         def _authorized(self) -> bool:
             if expected is None or self.headers.get("Authorization") == expected:
@@ -221,11 +269,13 @@ def serve(dashboard: Dashboard, host: str, port: int) -> ThreadingHTTPServer:
         def _json(self, status: int, payload: dict) -> None:
             self._send(status, json.dumps(payload).encode(), "application/json")
 
-        def _send(self, status: int, body: bytes, content_type: str) -> None:
+        def _send(self, status: int, body: bytes, content_type: str, headers: dict | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 

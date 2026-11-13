@@ -8,6 +8,7 @@ cd "$PROJECT_ROOT"
 [ -f config/system.env ] || cp config/system.env.example config/system.env
 set -a
 source "${DT_CONFIG:-config/system.env}"     # ROVER_IP, DASHBOARD_PORT, MAPPER_PYTHON
+[ -f .env ] && source .env                   # APP_USERNAME, APP_PASSWORD: the login, kept out of git
 MAPPER_PYTHON="${MAPPER_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 set +a
 [ -x "$MAPPER_PYTHON" ] || { echo "[dashboard] no Python at '$MAPPER_PYTHON': run scripts/setup_workstation.sh" >&2; exit 1; }

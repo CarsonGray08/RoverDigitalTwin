@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Iterator
 
-from rover_twin.phone.protocol import Arrival, Event, Msg, ProtocolError, encode, read_frame
+from rover_twin.phone.protocol import LENGTH, Arrival, Event, Msg, ProtocolError, encode, read_frame
 from rover_twin.phone.recording import Recorder
 
 
@@ -51,6 +51,14 @@ class PhoneLink:
                 return True
             except OSError:
                 return False
+
+    def inject(self, kind: Msg) -> None:
+        """Put a host event into the phone stream, recorded with it, so the
+        mapper handles it in order with the frames and a replay does too."""
+        arrival = Arrival(time.monotonic(), encode(Event(kind))[LENGTH.size:])
+        if self._recorder is not None:
+            self._recorder.write(arrival)
+        self._queue.put(arrival)
 
     def close(self) -> None:
         self._closed.set()

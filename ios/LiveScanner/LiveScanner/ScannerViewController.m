@@ -49,6 +49,8 @@ static const uint16_t kDefaultPort = 9099;
             [strongSelf startScanning];
         } else if (messageType == 9) {
             [strongSelf stopScanning];
+        } else if (messageType == 15) {
+            [strongSelf resetTracking];
         }
     };
     // Launch idle: wait for an explicit Start (button or host remote control)
@@ -182,6 +184,17 @@ static const uint16_t kDefaultPort = 9099;
     [self updateScanButton];
 }
 
+// Host remote control: restart ARKit's tracking when its pose has run off or
+// frozen, which otherwise only relaunching the app fixes. The host clears its
+// map when it hears back, and anchors again once the phone holds still.
+- (void)resetTracking {
+    if (![ARWorldTrackingConfiguration supportsSceneReconstruction:ARSceneReconstructionMesh]) {
+        return;
+    }
+    [self runSession];
+    [self.streamer sendTrackingReset];
+}
+
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
 
@@ -189,6 +202,21 @@ static const uint16_t kDefaultPort = 9099;
         self.statusLabel.text = @"This device has no LiDAR scene reconstruction.";
         return;
     }
+    [self runSession];
+
+    // Auto-connect on launch so the host can drive start/stop remotely without a
+    // manual Connect tap. The user can still edit the host field + tap Connect to
+    // point elsewhere (which reconnects).
+    if (!self.streamer.connected) {
+        NSString *host = self.hostField.text.length ? self.hostField.text : kDefaultHost;
+        [self.streamer connectToHost:host port:kDefaultPort];
+    }
+
+    [self scheduleStatusUpdates];
+}
+
+// (Re)starts the AR session from scratch: a new world origin at the phone.
+- (void)runSession {
     ARWorldTrackingConfiguration *config = [[ARWorldTrackingConfiguration alloc] init];
     // In continuous RGB-D (nvblox) mode the host builds geometry from the depth
     // stream and ignores ARKit mesh anchors, so skip scene reconstruction (and
@@ -211,16 +239,6 @@ static const uint16_t kDefaultPort = 9099;
     [self.sceneView.session runWithConfiguration:config
                                          options:ARSessionRunOptionResetTracking |
                                                  ARSessionRunOptionRemoveExistingAnchors];
-
-    // Auto-connect on launch so the host can drive start/stop remotely without a
-    // manual Connect tap. The user can still edit the host field + tap Connect to
-    // point elsewhere (which reconnects).
-    if (!self.streamer.connected) {
-        NSString *host = self.hostField.text.length ? self.hostField.text : kDefaultHost;
-        [self.streamer connectToHost:host port:kDefaultPort];
-    }
-
-    [self scheduleStatusUpdates];
 }
 
 - (void)connectTapped {

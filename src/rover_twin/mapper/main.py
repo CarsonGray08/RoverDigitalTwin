@@ -5,7 +5,10 @@
 
 Live, it serves the phone and records the stream into the run directory, and
 answers ``POST /scan/start`` and ``/scan/stop`` on ``127.0.0.1:phone.control_port``
-by telling the connected phone to start or stop scanning (the dashboard's 360 scan).
+by telling the connected phone to start or stop scanning (the dashboard's 360 scan),
+``POST /tracking/reset`` by telling it to restart ARKit (the map is cleared when
+the phone says it has), and ``POST /map/clear`` by forgetting the map.
+``GET /camera.jpg`` there is the phone's latest colour image (the dashboard's camera view).
 ``--replay`` feeds a recording instead, paced at its recorded arrival times
 (``--speed 0``: as fast as the mapper goes). Each run writes its outputs and
 metrics to a fresh directory under ``run.root``.
@@ -19,6 +22,7 @@ import shutil
 import signal
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -51,17 +55,18 @@ def main(argv: list[str] | None = None) -> None:
     shutil.copy(args.config, run_dir / "config.toml")
     tsdf = NvbloxTsdf(cfg.tsdf.voxel_m, cfg.depth.max_range_m)
     link = LinkServer(cfg.link.host, cfg.link.port)
+    mapper = Mapper(cfg, tsdf, link, run_dir)
     phone = recorder = control = None
     if args.replay:
         arrivals = recording.replay(args.replay, args.speed)
     else:
         recorder = recording.Recorder(run_dir / "phone.scanlog") if cfg.run.record else None
         arrivals = phone = PhoneLink(cfg.phone.host, cfg.phone.port, recorder)
-        control = serve_control(phone, cfg.phone.control_port)
+        control = serve_control(phone, cfg.phone.control_port, lambda: mapper.camera)
     print(f"mapper: run {run_dir}, phone {'replay ' + str(args.replay) if args.replay else cfg.phone.port}, "
           f"twin link {link.port}", flush=True)
     try:
-        Mapper(cfg, tsdf, link, run_dir).run(arrivals)
+        mapper.run(arrivals)
     except KeyboardInterrupt:
         pass
     finally:
@@ -73,23 +78,43 @@ def main(argv: list[str] | None = None) -> None:
     print(f"mapper: outputs in {run_dir}", flush=True)
 
 
-def serve_control(phone: PhoneLink, port: int) -> ThreadingHTTPServer:
-    """Scan start/stop for the dashboard; 409 when no phone is connected."""
-    controls = {"/scan/start": Msg.START_SCAN, "/scan/stop": Msg.STOP_SCAN}
+def serve_control(phone: PhoneLink, port: int,
+                  camera: Callable[[], tuple[bytes, float] | None] = lambda: None) -> ThreadingHTTPServer:
+    """Scan start/stop and tracking reset for the dashboard, 409 when no phone
+    is connected; map clear, which needs no phone; and the latest colour
+    image, 404 before the first. Its age (s) is ``X-Age-S``."""
+    controls = {"/scan/start": Msg.START_SCAN, "/scan/stop": Msg.STOP_SCAN, "/tracking/reset": Msg.RESET_TRACKING}
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            image = camera() if self.path == "/camera.jpg" else None
+            if image is None:
+                self._reply(404, {"error": "no colour image yet" if self.path == "/camera.jpg" else "not_found"})
+                return
+            jpeg, t = image
+            self._send(200, jpeg, "image/jpeg", {"X-Age-S": f"{time.monotonic() - t:.2f}"})
+
         def do_POST(self) -> None:
             kind = controls.get(self.path)
-            if kind is None:
-                status, payload = 404, {"error": "not_found"}
+            if self.path == "/map/clear":
+                phone.inject(Msg.CLEAR_MAP)
+                self._reply(200, {"ok": True})
+            elif kind is None:
+                self._reply(404, {"error": "not_found"})
             elif phone.send(kind):
-                status, payload = 200, {"ok": True}
+                self._reply(200, {"ok": True})
             else:
-                status, payload = 409, {"error": "no phone is connected to the mapper"}
-            body = json.dumps(payload).encode()
+                self._reply(409, {"error": "no phone is connected to the mapper"})
+
+        def _reply(self, status: int, payload: dict) -> None:
+            self._send(status, json.dumps(payload).encode(), "application/json")
+
+        def _send(self, status: int, body: bytes, content_type: str, headers: dict | None = None) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 

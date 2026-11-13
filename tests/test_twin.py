@@ -3,6 +3,7 @@ import math
 import queue
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import replace
 
@@ -192,6 +193,51 @@ def test_a_rehearsal_is_drawn_as_it_runs():
     assert status == 200 and result["approved"], result
     simulated_s = rover.t
     assert rover.renders == pytest.approx(simulated_s * main.REHEARSAL_RENDER_HZ, abs=2)
+
+
+def test_the_twin_serves_its_view_as_it_draws_it():
+    class View:
+        drawn = 0
+
+        def frame_drawn(self):
+            self.drawn += 1
+
+        def latest(self):
+            return (b"\xff\xd8view", 0.25) if self.drawn else None
+
+    class NoLink:
+        connected = threading.Event()
+
+        def take(self):
+            return None
+
+    view, t = View(), [0.0]
+    twin = Twin(CFG, FakeRover(), None, NoLink(), clock=lambda: t[0], view=view)
+    http = serve(twin, "127.0.0.1", 0)
+    url = f"http://127.0.0.1:{http.server_address[1]}/view.jpg"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as missing:
+            urllib.request.urlopen(url, timeout=2)
+        assert missing.value.code == 404
+        for _ in range(3):
+            twin.tick()
+            t[0] += 1.0 / main.RENDER_HZ
+        assert view.drawn == 3
+        with urllib.request.urlopen(url, timeout=2) as response:
+            assert response.read() == b"\xff\xd8view" and response.headers["X-Age-S"] == "0.25"
+    finally:
+        http.shutdown()
+
+
+def test_the_view_follows_the_ghost_through_the_rovers_chase_camera():
+    from pxr import Usd
+
+    from rover_twin.twin.rover import Ghost
+
+    stage = Usd.Stage.Open("assets/rover_twin.usda", load=Usd.Stage.LoadNone)
+    ghost = Ghost(stage, stage.GetPrimAtPath(CFG.twin.rover_prim))
+    assert ghost.camera(CFG.twin.camera) == "/World/Ghost/rover_body/chase_camera"
+    assert ghost.camera("no_such_camera") is None and ghost.camera("") is None
 
 
 def test_twin_tracks_the_mapper_and_validates_on_its_terrain(scan, tmp_path):

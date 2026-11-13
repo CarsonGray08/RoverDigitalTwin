@@ -38,6 +38,33 @@
     </div>
   </section>
 
+  <section class="card" id="views">
+    <h2>Live views</h2>
+    <div class="view-grid">
+      <figure class="view">
+        <figcaption>
+          <span class="view-title">Phone camera</span>
+          <span class="view-age" id="camera-age"></span>
+          <button id="camera-rotate" class="small" title="Rotate the camera image a quarter turn">Rotate</button>
+        </figcaption>
+        <div class="view-frame">
+          <canvas id="camera-view"></canvas>
+          <div class="map-empty" id="camera-empty">No camera image yet: connect the phone and start a scan</div>
+        </div>
+      </figure>
+      <figure class="view">
+        <figcaption>
+          <span class="view-title">Twin</span>
+          <span class="view-age" id="twin-age"></span>
+        </figcaption>
+        <div class="view-frame">
+          <canvas id="twin-view"></canvas>
+          <div class="map-empty" id="twin-empty">No twin view yet: start the mapper and twin</div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
   <section class="card" id="map-view">
     <h2>Map</h2>
     <div class="map-frame">
@@ -52,6 +79,11 @@
       <span><i class="swatch rover"></i>rover (live pose)</span>
     </div>
     <div class="stats-row" id="stats-row"></div>
+    <div class="button-row">
+      <button id="map-clear">Clear map</button>
+      <button id="tracking-reset">Reset phone tracking</button>
+    </div>
+    <p class="hint"><b>Clear map</b> forgets what was mapped (ghosts, a long session's history) and keeps the rover where it is; the map grows again as the phone looks around. <b>Reset phone tracking</b> restarts the phone's tracking when the pose runs off or freezes: the map is cleared and anchors again once the rover holds still, with the rover at the start pose. Neither works while the rover is moving.</p>
   </section>
 
   <section class="card" id="twin-control">
@@ -84,7 +116,7 @@
       <button id="drive-start" class="primary">Rehearse &amp; drive</button>
       <button id="motion-stop" class="danger">STOP</button>
     </div>
-    <p class="hint">Each command is rehearsed on the live map before it runs, and stopped on the live pose. Disarmed, it is only rehearsed. The scan starts the phone scanning, then makes four 90&deg; turns without rehearsing them: the live pose still stops each turn, and STOP stops the rover.</p>
+    <p class="hint">Each command is rehearsed on the live map before it runs, and stopped on the live pose. Disarmed, it is only rehearsed. The scan starts the phone scanning, then makes eight 45&deg; turns without rehearsing them: the live pose still stops each turn, and STOP stops the rover.</p>
     <pre id="motion-log" class="log" aria-label="drive log"></pre>
   </section>
 </main>

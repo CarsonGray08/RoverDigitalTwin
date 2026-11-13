@@ -32,6 +32,10 @@ static const uint8_t kMsgRealign = 10;
 static const uint8_t kMsgImu = 12;  // 6 float32 body: accel m/s^2, gyro rad/s
 static const uint8_t kMsgControlEnableImu = 13;
 static const uint8_t kMsgControlDisableImu = 14;
+// Host -> phone: restart ARKit's tracking. The phone answers kMsgTrackingReset
+// once the session is restarted, so the host knows which poses are in the new world.
+static const uint8_t kMsgControlResetTracking = 15;
+static const uint8_t kMsgTrackingReset = 16;
 // Flag bits of mesh anchor messages (the host does not read these messages):
 //   kFlagHasNormals: trailing per-vertex normal block (smooth shading).
 //   kFlagTextured: anchor is textured from a keyframe image (trailing image id
@@ -391,7 +395,8 @@ static const int kConnectTimeoutSeconds = 3;
             self.imuStreamingEnabled = NO;
             continue;
         }
-        if (messageType == kMsgControlStartScan || messageType == kMsgControlStopScan) {
+        if (messageType == kMsgControlStartScan || messageType == kMsgControlStopScan
+                || messageType == kMsgControlResetTracking) {
             void (^callback)(uint8_t) = self.onRemoteControl;
             if (callback != nil) {
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -818,9 +823,20 @@ static const int kConnectTimeoutSeconds = 3;
 // (Reset Position). Header-only, sent whether or not streaming is enabled so the
 // operator can zero the origin before starting a scan.
 - (void)sendRealign {
+    [self sendEvent:kMsgRealign];
+}
+
+// Tell the host ARKit's session was restarted (after kMsgControlResetTracking):
+// poses after this are in a new ARKit world. Queued behind every frame already
+// captured, so the host sees it between the old world and the new one.
+- (void)sendTrackingReset {
+    [self sendEvent:kMsgTrackingReset];
+}
+
+- (void)sendEvent:(uint8_t)messageType {
     NSMutableData *payload = [NSMutableData data];
     [self appendHeaderTo:payload
-              messageType:kMsgRealign
+              messageType:messageType
                     flags:0
                  anchorId:[[NSUUID alloc] initWithUUIDBytes:(const unsigned char[16]){0}]
                 timestamp:CACurrentMediaTime()

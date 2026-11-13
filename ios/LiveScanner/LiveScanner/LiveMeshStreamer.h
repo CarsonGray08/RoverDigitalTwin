@@ -33,7 +33,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Host -> phone remote control. The host can push start/stop-scan commands over
 // the same socket; this block
 // is invoked on the main queue with messageType 8 (START) or 9 (STOP) so the UI
-// can begin/finish a scan without a button tap. STOP should send finalize.
+// can begin/finish a scan without a button tap, or 15 (RESET TRACKING) to
+// restart the AR session. STOP should send finalize.
 @property (nonatomic, copy, nullable) void (^onRemoteControl)(uint8_t messageType);
 
 - (void)connectToHost:(NSString *)host port:(uint16_t)port;
@@ -60,6 +61,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Tells the host to re-anchor the ARKit->twin alignment to the phone's current
 // pose. Send this from Reset Position after mounting the phone on the rover.
 - (void)sendRealign;
+
+// Tells the host ARKit's tracking was restarted: later poses are in a new world.
+- (void)sendTrackingReset;
 
 // Sends a remove_anchor message so the host drops the prim/grid cells.
 - (void)removeAnchorWithId:(NSUUID *)anchorId;

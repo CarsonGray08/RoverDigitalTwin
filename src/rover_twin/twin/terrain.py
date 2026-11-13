@@ -158,6 +158,9 @@ class StageTerrain:
     def show(self, mesh: Mesh) -> None:
         from pxr import Sdf, UsdGeom, Vt
 
+        if not len(mesh.faces):                  # the map was cleared
+            self.stage.RemovePrim(f"{self.root}/Visual")
+            return
         prim = UsdGeom.Mesh.Define(self.stage, f"{self.root}/Visual")
         prim.CreateSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
         # astype copies to native order: Isaac's USD rejects the wire's explicit little-endian buffers

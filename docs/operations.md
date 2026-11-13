@@ -15,6 +15,24 @@ Run commands from the repository root on the [configured workstation](setup.md).
    Then use **Rehearse & drive**. Motion is rehearsed only until the arm
    switch is on and a rover IP is set. **STOP** stops the rover.
 
+Under the map, **Clear map** forgets everything mapped so far (something left
+behind as an obstacle, or a long session whose re-fuses have grown slow) and
+keeps the rover where it is; the map grows again as the phone looks around,
+so turn the rover or run a scan before driving. **Reset phone tracking**
+restarts ARKit on the phone, for a pose that runs off or freezes while the
+rover stands still: the map is cleared and anchors again once the rover holds
+still, with the rover at the start pose. It needs the LiveScanner built from
+this repository (older builds ignore it). Neither runs while the rover moves.
+
+**Live views** shows the phone's camera (once it scans; **Rotate** turns the
+image to match how the phone is mounted) and the twin's 3D view, each with
+its age. The twin's view, on screen and in the dashboard, looks through the
+rover's chase camera at its live pose, so it follows the rover; a rehearsal
+drives off from there. `twin.camera` names another camera on the rover, or
+`""` for Isaac's own. The twin captures its view at `twin.view_hz` (5 Hz by
+default), which costs it a little GPU time; set it to 0 under `[twin]` in
+`config/rover_twin.toml` to turn it off.
+
 `./scripts/rover_twin.sh` starts mapper and twin without the dashboard; Ctrl-C
 stops both. The arm switch resets on page load.
 
@@ -34,6 +52,27 @@ hardware trial, have someone at the hardware stop, confirm the controller's
 `/<rover-name>/command_status` endpoint responds, then rehearse and fly a
 0.25 m drive (`FWD`, speed 30, distance 5750) and a 90° turn. Keep the logs.
 Real speed levels 2/3 and the rover's climbable step height still need measuring.
+
+## Remote operation
+
+`./scripts/remote_dashboard.sh` starts the dashboard and a Cloudflare tunnel
+that publishes it, and prints the public address; Ctrl-C stops both. Mapper,
+twin, phone and rover stay on the workstation's local network: only the
+dashboard crosses the internet. In the field, take the workstation with the
+rover and put all three on the rover's router. It needs, in `.env` (not in git):
+
+```bash
+APP_USERNAME=...            # the dashboard's login; also asked on the local network
+APP_PASSWORD=...
+TUNNEL_CONFIG=/path/to/cloudflared.yml   # its ingress routes the hostname to http://127.0.0.1:8090
+CLOUDFLARED=/path/to/cloudflared         # if it is not on PATH
+```
+
+Through the tunnel, plain HTTP is redirected to HTTPS before the login. A new
+hostname needs a DNS route once:
+`cloudflared tunnel route dns <tunnel> <hostname>`. STOP crosses the internet,
+but the live pose stops a drive on the workstation itself. Keep someone at
+the rover for remote runs.
 
 ## Record and replay
 

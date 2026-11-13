@@ -14,21 +14,61 @@ only through the ray's vertical component, plus attitude noise, which tilts
 every ray. The measurement is fused by inverse-variance weighting, except
 that one more than ``step_m`` above the cell is a new surface on top (an
 obstacle, a wall) and replaces it, and one more than ``step_m`` below is a
-surface hidden under it and is ignored.
+surface hidden under it and is ignored, unless the frame shows the cell's
+surface gone. Its column, from just above the lower ground up to its top, is
+projected into the frame's depth image. Anything the rover can hit stands
+on the ground, so the foot of the column must be seen past: depth beyond it
+around every point there (someone who stood there has walked away; a dark
+thing whose own pixels have no depth is not seen past). Above that, a point
+without depth around it is let be, but a nearer surface or one at the column
+anywhere in it keeps the cell (an overhang the camera sees under is in its
+own column, so it stays), and so does part of it the camera cannot see,
+except above its eye line. The highest point it sees must be seen past too:
+a dark chair seat on an open base has no depth of its own, and the floor
+seen under it does not make it gone.
+After ``CLEAR_FRAMES`` such frames in a row the ground replaces it.
+
+A rebuild re-fuses old frames, which still hold whatever has left. The
+mapper hands the grid a veto (:meth:`ElevationGrid.set_veto`): the cells
+seen gone and when, so a frame from before then is not evidence of anything
+standing there. Later frames count as ever, so someone who comes back is mapped.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
 
 from rover_twin.config import Elevation
+from rover_twin.frames import Intrinsics, rigid_inverse
 
 UNKNOWN, OBSERVED, INFERRED = 0, 1, 2
 SPIKE_NEIGHBOURS = 5     # observed of a cell's 8 before it can be judged a lone spike
+NEIGHBOURHOOD = np.stack(np.mgrid[-1:2, -1:2], -1).reshape(-1, 2)
+CLEAR_FRAMES = 3         # frames in a row that see a surface gone before it is
+COLUMN_DZ_M = 0.03       # spacing of the points checked up a cell's column
+# A point is seen past only if the pixels this close with depth all see
+# beyond it: (rows, columns). Wide, for a pose a few cm off sideways at a
+# face's edge; not tall, or the floor in front of every point would hide it.
+WINDOW_PX = (5, 15)
+MIN_WITH_DEPTH = 0.6     # ... and at least this share of them has depth: grazing floor beyond is patchy
+SEEN_CONFIDENCE = 1      # ARKit medium: beyond is all it asks of a pixel, not where exactly
+PAST_M, PAST_PER_M = 0.05, 0.03   # how far beyond: depth noise, pose and cell size
+FOOT = 3                 # points at the bottom of a column (from step_m up) that must be seen past
+
+
+@dataclass(frozen=True, eq=False)
+class View:
+    """The frame points came from: its depth and ARKit confidence (None: all
+    trusted), its intrinsics and its camera pose (CV axes, in the world)."""
+
+    depth: np.ndarray
+    confidence: np.ndarray | None
+    intrinsics: Intrinsics
+    T_W_C: np.ndarray
 
 Key = tuple[int, int]
 
@@ -38,17 +78,53 @@ class ElevationGrid:
         self.cfg = cfg
         self.n = cfg.tile_cells
         self.tiles: dict[Key, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}   # height, weight, state
+        self._gone: dict[int, int] = {}     # packed cell: frames in a row that saw its surface gone
+        self.cleared = 0                    # cells cleared so far: a surface seen gone
+        self.last_cleared = (np.zeros((0, 2), np.int64), np.zeros(0))   # by the last integrate: cells, ground
+        self._veto = None                   # see set_veto
 
     def clear(self) -> None:
+        """Forget every cell; the veto stays (a rebuild clears, then re-fuses)."""
         self.tiles.clear()
+        self._gone.clear()
 
-    def integrate(self, points: np.ndarray, camera: np.ndarray) -> set[Key]:
+    def set_veto(self, cells: np.ndarray, t: np.ndarray, ground: np.ndarray) -> None:
+        """Cells whose surface was seen gone at phone time ``t``, down to
+        ``ground``: a frame from before then is not evidence of anything
+        standing there, so a rebuild that re-fuses old frames does not bring
+        back someone who has left. Later frames count as ever."""
+        if len(cells) == 0:
+            self._veto = None
+            return
+        keys = _pack(cells)
+        order = np.lexsort((-t, keys))            # per cell, its latest clearing first
+        keys, t, ground = keys[order], t[order], ground[order]
+        first = np.r_[True, keys[1:] != keys[:-1]]
+        self._veto = (keys[first], t[first], ground[first])
+
+    def _vetoed(self, points: np.ndarray, t: float) -> np.ndarray:
+        """Points above the ground of a cell seen gone after ``t``."""
+        keys, times, ground = self._veto
+        if t >= times.max():
+            return np.zeros(len(points), bool)
+        packed = _pack(np.floor(points[:, :2] / self.cfg.cell_m).astype(np.int64))
+        at = np.minimum(np.searchsorted(keys, packed), len(keys) - 1)
+        return (keys[at] == packed) & (t < times[at]) & (points[:, 2] > ground[at] + self.cfg.step_m)
+
+    def integrate(self, points: np.ndarray, camera: np.ndarray, view: View | None = None,
+                  t: float | None = None) -> set[Key]:
         """Fuse world points seen from ``camera`` (world position); returns the
-        tiles whose collider patch changed."""
+        tiles whose collider patch changed. With the ``view`` they came from,
+        a surface the frame shows gone is cleared (see the module docstring).
+        ``t``, the frame's phone time, is checked against the veto."""
         cfg = self.cfg
+        self.last_cleared = (np.zeros((0, 2), np.int64), np.zeros(0))
         z = points[:, 2]
         keep = (z >= cfg.min_height_m) & (z <= cfg.max_height_m)
         points, z = points[keep], z[keep]
+        if self._veto is not None and t is not None and len(z):
+            keep = ~self._vetoed(points, t)
+            points, z = points[keep], z[keep]
         if len(z) == 0:
             return set()
         ray = points - camera
@@ -64,11 +140,72 @@ class ElevationGrid:
         m = np.bincount(inverse[band], (z * inv_var)[band], len(cells)) / w
 
         h, weight, state = self._get(cells)
-        replace = (state != OBSERVED) | (m > h + cfg.step_m)
+        below = (state == OBSERVED) & (m < h - cfg.step_m)
+        gone = np.zeros(len(cells), bool)
+        if view is not None and below.any():
+            gone[below] = self._gone_in(view, cells[below], m[below], h[below])
+        cleared = self._count_gone(keys, gone)
+        self.cleared += int(cleared.sum())
+        self.last_cleared = (cells[cleared], m[cleared])
+        replace = (state != OBSERVED) | (m > h + cfg.step_m) | cleared
         changed = replace | (m >= h - cfg.step_m)
         new_h = np.where(replace, m, (h * weight + m * w) / (weight + w))
         new_w = np.where(replace, w, weight + w)
         return self._set(cells[changed], new_h[changed], new_w[changed], np.full(changed.sum(), OBSERVED))
+
+    def _gone_in(self, view: View, cells: np.ndarray, ground: np.ndarray, top: np.ndarray) -> np.ndarray:
+        """For each cell, whether ``view`` sees past the whole of its column
+        from ``ground`` up to ``top`` that it could see."""
+        cfg = self.cfg
+        n = np.maximum(np.ceil((top - ground - cfg.step_m) / COLUMN_DZ_M), 1).astype(np.int64)
+        which = np.repeat(np.arange(len(cells)), n)
+        k = np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)
+        z = np.minimum(ground[which] + cfg.step_m + k * COLUMN_DZ_M, top[which])
+        T_C_W = rigid_inverse(view.T_W_C)
+        camera = np.column_stack([(cells[which] + 0.5) * cfg.cell_m, z]) @ T_C_W[:3, :3].T + T_C_W[:3, 3]
+        intr, depth = view.intrinsics, view.depth
+        ahead = camera[:, 2] > 0.1
+        safe = np.where(ahead, camera[:, 2], 1.0)
+        u = np.floor(intr.fx * camera[:, 0] / safe + intr.cx).astype(np.int64)
+        v = np.floor(intr.fy * camera[:, 1] / safe + intr.cy).astype(np.int64)
+        in_view = ahead & (u >= 0) & (u < depth.shape[1]) & (v >= 0) & (v < depth.shape[0])
+        valid = np.isfinite(depth) & (depth > 0)
+        if view.confidence is not None:
+            valid &= view.confidence >= SEEN_CONFIDENCE
+        nearest = ndimage.minimum_filter(np.where(valid, depth, np.inf), size=WINDOW_PX, mode="nearest")
+        share = ndimage.uniform_filter(valid.astype(np.float32), size=WINDOW_PX, mode="nearest")
+        vv, uu = np.clip(v, 0, depth.shape[0] - 1), np.clip(u, 0, depth.shape[1] - 1)
+        beyond = nearest[vv, uu] > camera[:, 2] + PAST_M + PAST_PER_M * camera[:, 2]
+        past = in_view & (share[vv, uu] >= MIN_WITH_DEPTH) & beyond
+        # Something at or before the point, or a point below the camera's eye
+        # line it cannot see (it sees all of the column the ground is seen
+        # from), keeps the cell; so does a foot point not seen past.
+        keeps = (in_view & ~beyond) | (~in_view & (z <= view.T_W_C[2, 3])) | ((k < FOOT) & ~past)
+        # So does the top of what it sees of the column, unless seen past: a
+        # surface on a thin stem whose own pixels have no depth (a dark chair
+        # seat over an open base) is not gone because the floor is seen under it.
+        highest = np.full(len(cells), -1)
+        np.maximum.at(highest, which[in_view], k[in_view])
+        keeps |= in_view & (k == highest[which]) & ~past
+        return np.bincount(which, keeps, len(cells)) == 0
+
+    def _count_gone(self, keys: np.ndarray, gone: np.ndarray) -> np.ndarray:
+        """Count frames in a row that saw each cell's surface gone (``keys``
+        packed); any other look at a cell starts it over. True where it reaches
+        CLEAR_FRAMES."""
+        if self._gone:
+            held = np.fromiter(self._gone, np.int64, len(self._gone))
+            for key in held[np.isin(held, keys[~gone])]:
+                del self._gone[int(key)]
+        cleared = np.zeros(len(keys), bool)
+        for i in np.flatnonzero(gone):
+            count = self._gone.get(int(keys[i]), 0) + 1
+            if count >= CLEAR_FRAMES:
+                cleared[i] = True
+                self._gone.pop(int(keys[i]), None)
+            else:
+                self._gone[int(keys[i])] = count
+        return cleared
 
     def ground(self, center_xy) -> float | None:
         """The ground the rover stands on at ``center_xy``: the median observed
@@ -169,8 +306,10 @@ class ElevationGrid:
                                           np.zeros((self.n, self.n), np.uint8))
             i, j = local[idx, 0], local[idx, 1]
             tile[0][i, j], tile[1][i, j], tile[2][i, j] = h[idx], w[idx], s[idx]
-        # A cell on a tile's first row or column is also in the apron of the
-        # neighbouring patch on that side.
+        # A cell is in its own tile's patch and, on a first row or column, also
+        # in the apron of the neighbouring patch on that side. A lone spike is
+        # judged against its 8 neighbours, so the patches holding those change too.
+        keys, local = np.divmod((cells[:, None, :] + NEIGHBOURHOOD).reshape(-1, 2), self.n)
         edge = local == 0
         touched = np.concatenate([keys, keys - edge * [1, 0], keys - edge * [0, 1], keys - edge.all(1, keepdims=True)])
         return {(int(a), int(b)) for a, b in _unpack(np.unique(_pack(touched)))} & self.tiles.keys()

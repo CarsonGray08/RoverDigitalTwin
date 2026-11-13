@@ -41,7 +41,10 @@ from rover_twin.frames import wrap_deg
 from rover_twin.ops.rover import Rover, steps
 
 POLL_S = 0.1
-POSE_MAX_AGE_S = 1.0                  # an older live pose is not driven on
+# An older live pose is not driven on. A map rebuild holds the pose back while
+# it runs (about 1 s for a 360 deg scan's loop closure, more in a long
+# session); at the rover's ~3.5 cm/s and ~4 deg/s that is <= ~9 cm / 10 deg.
+POSE_MAX_AGE_S = 2.5
 STOP_SHORT_M, STOP_SHORT_DEG = 0.01, 1.0     # the rover coasts a little after STOP
 TOP_UP_S = 1.0                        # no progress for this long: its steps may be spent, send them again
 STALL_S = 3.0                         # no progress for this long after that: stuck

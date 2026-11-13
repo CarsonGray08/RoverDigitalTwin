@@ -8,9 +8,9 @@ them the sim rover is held where the real one is, since live tiles become
 solid only at the reload before a rollout (it would fall through them). Validation
 requests from the HTTP API run as jobs in the same loop, so the terrain never
 changes under a rollout and the next one starts from the latest map; the
-operator's view is drawn as a rollout runs, so a rehearsal plays on screen. The live
-pose is answered at once, never behind a job: the drive loop stops the real
-rover on it.
+operator's view is drawn as a rollout runs, so a rehearsal plays on screen,
+and captured for the dashboard (``GET /view.jpg``). The live pose is answered
+at once, never behind a job: the drive loop stops the real rover on it.
 """
 
 from __future__ import annotations
@@ -42,8 +42,9 @@ POSE_HZ = 10.0      # the sim rover's pose, read for /observation
 
 class Twin:
     def __init__(self, cfg: config.Config, rover: SimRover, terrain: StageTerrain, link: LinkClient,
-                 clock=time.monotonic) -> None:
+                 clock=time.monotonic, view=None) -> None:
         self.cfg, self.rover, self.terrain, self.link, self.clock = cfg, rover, terrain, link, clock
+        self.view = view                  # the viewport's capture for the dashboard, if any
         self.map = TerrainMap()
         self.validator = Validator(cfg, _Drawn(rover, lambda: self._draw(self._rehearsal_render_s)), self.map)
         self.jobs: queue.Queue = queue.Queue()
@@ -96,6 +97,8 @@ class Twin:
         if every_s and self.clock() >= self._render_due:
             t0 = self.clock()
             self.rover.render()
+            if self.view is not None:
+                self.view.frame_drawn()
             self.watch.took("render", self.clock() - t0)
             # From when it was due, not when it finished: a 9 ms frame would cut 60 Hz to 39.
             self._render_due = max(self._render_due + every_s, self.clock())
@@ -178,7 +181,8 @@ class _Drawn:
 
 def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
     """``GET /health`` (with the rover's units and limits), ``GET /observation``,
-    ``GET /map`` and ``POST /validate_plan``. docs/twin-api.md is the contract."""
+    ``GET /map`` and ``POST /validate_plan``. docs/twin-api.md is the contract.
+    ``GET /view.jpg`` is the operator's view, its age (s) in ``X-Age-S``."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -188,6 +192,12 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
                 self._reply(200, twin.observation())
             elif self.path == "/map":
                 self._reply(*twin.submit("map"))
+            elif self.path == "/view.jpg":
+                frame = twin.view.latest() if twin.view is not None else None
+                if frame is None:
+                    self._reply(404, {"error": "no_view", "reason": "the view is off or not captured yet"})
+                else:
+                    self._send(200, frame[0], "image/jpeg", {"X-Age-S": f"{frame[1]:.2f}"})
             else:
                 self._reply(404, {"error": "not_found"})
 
@@ -204,10 +214,14 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
             self._reply(*twin.submit("validate", request))
 
         def _reply(self, status: int, payload: dict) -> None:
-            body = json.dumps(payload).encode()
+            self._send(status, json.dumps(payload).encode(), "application/json")
+
+        def _send(self, status: int, body: bytes, content_type: str, headers: dict | None = None) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -228,11 +242,15 @@ def main(argv: list[str] | None = None) -> None:
     cfg = config.load(args.config)
 
     from rover_twin.twin.rover import IsaacRover, boot
+    from rover_twin.twin.view import ViewportCapture
 
     app, stage = boot(cfg, args.experience)
     rover = IsaacRover(stage, cfg)
+    if cfg.twin.gui and cfg.twin.camera:
+        rover.watch(cfg.twin.camera)
     link = LinkClient(cfg.link.host, cfg.link.port)
-    twin = Twin(cfg, rover, StageTerrain(stage, friction=cfg.twin.terrain_friction), link)
+    view = ViewportCapture(cfg.twin.view_hz) if cfg.twin.gui and cfg.twin.view_hz > 0 else None
+    twin = Twin(cfg, rover, StageTerrain(stage, friction=cfg.twin.terrain_friction), link, view=view)
     server = serve(twin, cfg.twin.host, cfg.twin.port)
     metrics, next_write = args.run_dir / "twin_metrics.json", time.monotonic()
     print(f"twin: http://{cfg.twin.host}:{cfg.twin.port}, mapper link {cfg.link.port}", flush=True)
@@ -250,6 +268,8 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         twin.write_metrics(metrics)
         server.shutdown()
+        if view is not None:
+            view.close()
         link.close()
         rover.close()
         app.close()
