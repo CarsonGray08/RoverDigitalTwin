@@ -51,6 +51,38 @@ To drive to a point instead, let the twin plan a safe route there:
 ```
 
 See [the API reference](twin-api.md) for command units, limits and refusal results.
+
+## Run a mission (team1 branch)
+
+A mission file lists excavation jobs in the twin frame and the
+[`/plan_mission`](twin-api.md) options; `docs/examples/lab_mission.json` is
+five jobs on the saved lab map with a 20 min limit. Team 1's scheduler picks
+the order, the twin routes and rehearses every leg.
+
+```bash
+.venv/bin/python -m rover_twin.ops.mission docs/examples/lab_mission.json --start 0 0 0 --out plan.json   # offline twin
+.venv/bin/python -m rover_twin.ops.mission mission.json                                                   # live pose
+.venv/bin/python -m rover_twin.ops.mission mission.json --arm --rover-ip 192.168.0.157
+```
+
+Unarmed, it prints the plan (stops, legs, jobs left out and why) and moves
+nothing. Armed, it shows the plan and waits for `y`, then for each step:
+
+| Step | Rover | Operator |
+|---|---|---|
+| Drive | Goes to the next stop on routes the twin plans and rehearses, replanning the route from the live pose | Watch; STOP or Ctrl-C stops it |
+| Dig | Waits at the job | Run the drums; Enter when done, or `skip` |
+| Unload, charge | Waits at base | Do it; Enter when done |
+
+It keeps the mission's own account (time from the clock, cargo from your
+answers, battery estimated from the scheduler's rover model: there is no
+battery telemetry) and plans the rest again from there and the live pose
+when the twin refuses a route (at once), a drive fails for another reason
+(you choose to replan or end), you skip a job, or it falls more than 2 min
+and 20% behind its plan. Base stays where the mission started unless the
+file gives `base`. Steps and plans go to `mission_log.jsonl`, commands to
+`drive_log.jsonl`. The first armed run needs the same supervision as the
+hardware trial above.
 The driver rehearses the remaining plan before each command and stops on a
 refusal, stale/lost pose, controller fault, completion or Ctrl-C.
 

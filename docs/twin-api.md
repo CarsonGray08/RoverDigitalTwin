@@ -186,6 +186,11 @@ Refusals: `base_blocked`, `start_blocked`, `no_route_home`, `leg_refused`
 the field. The scheduler runs outside the simulation loop; only route costs
 and each leg's rehearsal queue in it.
 
+To fly a mission, `python -m rover_twin.ops.mission mission.json` (a body
+without `start_pose`) plans it; with `--arm --rover-ip IP` it flies it step
+by step with the operator, replanning from the live state on the way. See
+[operations](operations.md#run-a-mission-team1-branch).
+
 ### `GET /observation`
 
 Returns `live_pose` (null offline/before tracking), `rover_pose`,
