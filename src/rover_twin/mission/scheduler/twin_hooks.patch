@@ -1,0 +1,215 @@
+diff -ru a/scheduler.py b/scheduler.py
+--- a/scheduler.py	2026-11-22 00:10:39.014950725 +0000
++++ b/scheduler.py	2026-11-22 00:10:39.016453601 +0000
+@@ -37,7 +37,7 @@
+     def nearest(candidates: list[Task]) -> Task:
+         # Round the distance so mathematically equal distances that differ only
+         # in the last floating-point digit still tie and fall back to the ID.
+-        return min(candidates, key=lambda t: (round(distance(s.position, t), TIE_DECIMALS), t.id))
++        return min(candidates, key=lambda t: (round(sim.distance_to(s, t), TIE_DECIMALS), t.id))
+ 
+     while remaining:
+         feasible_now = [t for t in remaining if sim.feasible_now(t, s)]
+diff -ru a/scheduler_core.py b/scheduler_core.py
+--- a/scheduler_core.py	2026-11-22 00:10:39.008753542 +0000
++++ b/scheduler_core.py	2026-11-22 00:10:39.010281479 +0000
+@@ -12,6 +12,7 @@
+ TIE_DECIMALS = 9     # distances equal to this many decimals count as a tie
+ 
+ BASE_ID = "BASE"
++START_ID = "START"   # [twin] a mid-mission start away from base (see parse_start)
+ 
+ 
+ # ----------------------------------------------------------------------------
+@@ -160,3 +161,84 @@
+     return rover, base, tasks, sol
+ 
+ 
++
++
++# ----------------------------------------------------------------------------
++# [twin] Optional inputs added by the digital twin. Both are absent from every
++# mission the scheduler's own tools write, and then nothing above changes.
++# ----------------------------------------------------------------------------
++
++@dataclass(frozen=True)
++class Leg:
++    """One drive between two locations, as the twin routes it."""
++    distance_m: float
++    time_min: float
++
++
++@dataclass(frozen=True)
++class Start:
++    """Where and in what state the mission starts, if not at base, full and empty."""
++    location: str
++    x_m: float
++    y_m: float
++    battery_wh: float
++    elapsed_min: float
++    load_kg: float
++    delivered_kg: float
++
++
++def parse_travel(mission: dict, locations: set[str]) -> dict[tuple[str, str], Leg | None] | None:
++    """``mission["travel"]``: ``{from_id: {to_id: {"distance_m", "time_min"} | null}}``.
++
++    Replaces straight-line distance and constant speed with the twin's routes.
++    A missing or null leg means there is no route. None when absent.
++    """
++    travel = mission.get("travel")
++    if travel is None:
++        return None
++    if not isinstance(travel, dict):
++        raise MissionError("travel must be an object of objects")
++    table: dict[tuple[str, str], Leg | None] = {}
++    for a, row in travel.items():
++        if a not in locations or not isinstance(row, dict):
++            raise MissionError(f"travel: {a!r} is not a location of this mission, or its row is not an object")
++        for b, leg in row.items():
++            if b not in locations:
++                raise MissionError(f"travel[{a}]: {b!r} is not a location of this mission")
++            if leg is None:
++                table[(a, b)] = None
++                continue
++            _require(leg, ("distance_m", "time_min"), f"travel[{a}][{b}]")
++            table[(a, b)] = Leg(_number(leg["distance_m"], f"travel[{a}][{b}].distance_m"),
++                                _number(leg["time_min"], f"travel[{a}][{b}].time_min"))
++    return table
++
++
++def parse_start(mission: dict, rover: Rover, base: Point) -> Start | None:
++    """``mission["start"]``: where a replanned mission starts. ``location`` is
++    START_ID (away from base, at ``x_m``, ``y_m``) or BASE_ID; ``battery_wh``,
++    ``elapsed_min``, ``load_kg`` and ``delivered_kg`` default to a fresh start.
++    Jobs already done are left out of ``tasks``. None when absent."""
++    s = mission.get("start")
++    if s is None:
++        return None
++    if not isinstance(s, dict):
++        raise MissionError("start must be an object")
++    location = s.get("location", START_ID)
++    if location not in (START_ID, BASE_ID):
++        raise MissionError(f"start.location must be {START_ID} or {BASE_ID}")
++    if location == START_ID:
++        _require(s, ("x_m", "y_m"), "start")
++        x, y = _number(s["x_m"], "start.x_m", minimum=-math.inf), _number(s["y_m"], "start.y_m", minimum=-math.inf)
++    else:
++        x, y = base.x_m, base.y_m
++    start = Start(location, x, y,
++                  _number(s.get("battery_wh", rover.battery_wh), "start.battery_wh"),
++                  _number(s.get("elapsed_min", 0.0), "start.elapsed_min"),
++                  _number(s.get("load_kg", 0.0), "start.load_kg"),
++                  _number(s.get("delivered_kg", 0.0), "start.delivered_kg"))
++    if start.battery_wh > rover.battery_capacity_wh + EPS:
++        raise MissionError("start.battery_wh cannot exceed full battery capacity")
++    if start.load_kg > rover.capacity_kg + EPS:
++        raise MissionError("start.load_kg cannot exceed cargo capacity")
++    return start
+diff -ru a/simulator.py b/simulator.py
+--- a/simulator.py	2026-11-22 00:10:39.011715771 +0000
++++ b/simulator.py	2026-11-22 00:10:39.013116917 +0000
+@@ -36,12 +36,14 @@
+ from dataclasses import dataclass, field, replace
+ from typing import Iterable
+ 
+-from scheduler_core import BASE_ID, EPS, MissionError, Point, Rover, Task, distance, parse_mission
++from scheduler_core import (BASE_ID, EPS, START_ID, MissionError, Point, Rover, Task, distance, parse_mission,
++                             parse_start, parse_travel)
+ 
+ REASON_CAPACITY = "carrying capacity"
+ REASON_BATTERY = "battery including return reserve"
+ REASON_SOL = "sol time limit including return and unload"
+ REASON_EXCLUDED = "not in proposed sequence"
++REASON_NO_ROUTE = "no route on the twin's map"   # [twin] only with a travel table
+ 
+ # job_status values: every job in the mission gets exactly one of these.
+ STATUS_DELIVERED = "delivered"                 # completed and regolith unloaded at base
+@@ -77,9 +79,20 @@
+         self.rover, self.base, self.tasks, self.sol_limit_min = parse_mission(mission)
+         self.by_id: dict[str, Task] = {t.id: t for t in self.tasks}
+         self._start_battery = self.rover.battery_wh
++        # [twin] optional: the twin's routes in place of straight lines, and a mid-mission start
++        self.travel = parse_travel(mission, {BASE_ID, START_ID, *self.by_id})
++        self.start = parse_start(mission, self.rover, self.base)
++        if self.start is not None:
++            self._start_battery = self.start.battery_wh
+ 
+     # ------------------------------------------------------------------ state
+     def initial_state(self) -> MissionState:
++        if self.start is not None:      # [twin]
++            st = self.start
++            s = MissionState(position=Point(st.x_m, st.y_m), location=st.location, battery_wh=st.battery_wh,
++                             elapsed_min=st.elapsed_min, load_kg=st.load_kg, delivered_kg=st.delivered_kg)
++            self._record(s, "start")
++            return s
+         s = MissionState(position=self.base, location=BASE_ID,
+                          battery_wh=self.rover.battery_wh, elapsed_min=0.0)
+         self._record(s, "start")
+@@ -111,6 +124,8 @@
+         """
+         if from_base_full:
+             s = self.after_return_and_charge(s)
++        if self.travel is not None:     # [twin]
++            return self._why_not_feasible_on_routes(task, s)
+         r = self.rover
+         out_m = distance(s.position, task)
+         home_m = distance(task, self.base)
+@@ -127,6 +142,31 @@
+                 reasons.append(REASON_SOL)
+         return reasons
+ 
++    def _why_not_feasible_on_routes(self, task: Task, s: MissionState) -> list[str]:
++        """[twin] The same rules, with each leg's distance and time from the travel table."""
++        r = self.rover
++        out, home = self.travel.get((s.location, task.id)), self.travel.get((task.id, BASE_ID))
++        if out is None or home is None:
++            return [REASON_NO_ROUTE]
++        reasons = []
++        if s.load_kg + task.material_kg > r.capacity_kg + EPS:
++            reasons.append(REASON_CAPACITY)
++        need_wh = r.travel_power_w * (out.time_min + home.time_min) / 60.0 + task.energy_wh + r.reserve_wh
++        if s.battery_wh + EPS < need_wh:
++            reasons.append(REASON_BATTERY)
++        if self.sol_limit_min is not None:
++            finish = s.elapsed_min + out.time_min + task.task_min + home.time_min + r.unload_min
++            if finish > self.sol_limit_min + EPS:
++                reasons.append(REASON_SOL)
++        return reasons
++
++    def distance_to(self, s: MissionState, task: Task) -> float:
++        """Distance from the current position to a job: straight-line, or the twin's route."""
++        if self.travel is None:
++            return distance(s.position, task)
++        leg = self.travel.get((s.location, task.id))
++        return math.inf if leg is None else leg.distance_m
++
+     def feasible_now(self, task: Task, s: MissionState) -> bool:
+         return not self.why_not_feasible(task, s)
+ 
+@@ -145,6 +185,16 @@
+ 
+     # --------------------------------------------------------------- actions
+     def travel_to(self, s: MissionState, target, name: str) -> None:
++        if self.travel is not None:     # [twin]
++            leg = self.travel.get((s.location, name))
++            if leg is None:
++                raise MissionError(f"no route from {s.location} to {name} in the travel table")
++            s.battery_wh -= self.rover.travel_power_w * leg.time_min / 60.0
++            s.elapsed_min += leg.time_min
++            s.distance_m += leg.distance_m
++            s.position, s.location = Point(target.x_m, target.y_m), name
++            self._record(s, "travel", distance_m=leg.distance_m)
++            return
+         d = distance(s.position, target)
+         s.battery_wh -= self.rover.travel_energy(d)
+         s.elapsed_min += self.rover.travel_time(d)
+@@ -226,7 +276,7 @@
+             "jobs_delivered": counts[STATUS_DELIVERED],
+             "jobs_skipped_infeasible": counts[STATUS_SKIPPED],
+             "jobs_excluded_from_sequence": counts[STATUS_EXCLUDED],
+-            "route": [BASE_ID] + [e["location"] for e in s.events if e["action"] == "travel"],
++            "route": [s.events[0]["location"]] + [e["location"] for e in s.events if e["action"] == "travel"],
+             "completed_tasks": list(s.completed),
+             "unserviceable_tasks": skipped,          # with reasons
+             "objective_kg": s.delivered_kg,           # primary objective (maximise)

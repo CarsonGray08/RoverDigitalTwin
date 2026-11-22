@@ -1,0 +1,120 @@
+{
+  "_meta": {
+    "name": "preliminary_v2_2026-11-16",
+    "specification_status": "preliminary",
+    "description": "Corrected hardware-team information (16 Nov, second report). Battery corrected from the earlier misreported 2 x 12 V 120 Ah to 2 x 12.8 V 10 Ah LiFePO4 in parallel = 256 Wh nominal. Travel power 15 W re-classified as MEASURED (battery current sensor, preliminary). Speed unchanged. Usable capacity and reserve remain PROVISIONAL ASSUMPTIONS for exploratory runs; cargo, unloading, charging and excavation remain synthetic.",
+    "created": "2026-11-16",
+    "supersedes": "preliminary_2026-11-16 (config/rover_calibration_preliminary.json) - kept for comparison, do not use",
+    "source": "Hardware team report relayed 2026-11-16 (second report)",
+    "warning": "NOT PHYSICALLY VALIDATED. Replace entries as the data-collection workbook is filled in."
+  },
+  "parameters": {
+    "speed_m_per_min": {
+      "value": 2.1,
+      "unit": "m/min",
+      "status": "MEASURED",
+      "source": "Hardware team: physical speed setting 1 = 0.035 m/s (setting 1 will be used for the demonstration)",
+      "date": "2026-11-16",
+      "uncertainty": "PRELIMINARY: single reported value; trial count and method unknown; confirmation trials planned",
+      "notes": "Consistent with the twin repo note 'real rover ~0.035 m/s at level 1'. Simulated speeds are not used."
+    },
+    "travel_power_w": {
+      "value": 15,
+      "unit": "W",
+      "status": "MEASURED",
+      "source": "Hardware team: battery current sensor reading during actual driving, ~15 W",
+      "date": "2026-11-16",
+      "uncertainty": "PRELIMINARY: trial count, load state, surface and averaging window not reported; repeatability trials still needed",
+      "notes": "Implies 0.119 Wh per metre at 2.1 m/min (synthetic was 0.200). Previously (v1) carried as an ASSUMED component estimate; now re-classified per hardware team."
+    },
+    "battery_capacity_wh": {
+      "value": 204.8,
+      "unit": "Wh",
+      "status": "ASSUMED",
+      "source": "PROVISIONAL: 80% of nominal 256 Wh (2 x 12.8 V x 10 Ah LiFePO4, parallel)",
+      "date": "2026-11-16",
+      "uncertainty": "Usable fraction is a generic LiFePO4 depth-of-discharge assumption, not a discharge test; BMS limits unconfirmed",
+      "notes": "Justification: LiFePO4 packs are commonly cycled to 80-90% depth of discharge; 80% is the conservative end. Replace with the Charge_Tests discharge result. See sensitivity analysis for 70-100%."
+    },
+    "battery_wh": {
+      "value": 204.8,
+      "unit": "Wh",
+      "status": "ASSUMED",
+      "source": "Assume full (= usable capacity) at mission start",
+      "date": "2026-11-16",
+      "uncertainty": "Policy, not measurement"
+    },
+    "reserve_wh": {
+      "value": 25.6,
+      "unit": "Wh",
+      "status": "ASSUMED",
+      "source": "PROVISIONAL: 10% of nominal 256 Wh, as suggested by hardware team",
+      "date": "2026-11-16",
+      "uncertainty": "NOT an approved safety threshold; the physical BMS cutoff is unknown",
+      "notes": "Scheduling reserve only; never a physical safety limit. See sensitivity analysis for 5-20%."
+    },
+    "capacity_kg": {
+      "value": 10,
+      "unit": "kg",
+      "status": "SIMULATED",
+      "source": "Retained synthetic value; no cargo bin measurement yet",
+      "date": "2026-10-19"
+    },
+    "unload_min": {
+      "value": 2,
+      "unit": "min",
+      "status": "SIMULATED",
+      "source": "Retained synthetic value; no dump mechanism timed",
+      "date": "2026-10-19"
+    },
+    "charging_power_w": {
+      "value": 100,
+      "unit": "W",
+      "status": "SIMULATED",
+      "source": "Retained synthetic value; charger not characterised",
+      "date": "2026-10-19",
+      "notes": "A 100 W charger would refill 204.8 Wh in ~2 h; charging inside a 120-min sol is therefore possible only for small top-ups. Real charger unknown."
+    },
+    "default_excavation_power_w": {
+      "value": 120,
+      "unit": "W",
+      "status": "SIMULATED",
+      "source": "Retained synthetic value; rover cannot excavate",
+      "date": "2026-10-19"
+    },
+    "sol_limit_min": {
+      "value": 120,
+      "unit": "min",
+      "status": "POLICY",
+      "source": "Team decision 2026-11-02 (scaled lunar sol); unchanged",
+      "date": "2026-11-02"
+    }
+  },
+  "nominal_battery": {
+    "chemistry": "LiFePO4",
+    "pack_count": 2,
+    "rated_voltage_v_each": 12.8,
+    "rated_capacity_ah_each": 10,
+    "wiring": "parallel (confirmed by hardware team)",
+    "combined_voltage_v": 12.8,
+    "combined_capacity_ah": 20,
+    "nominal_energy_wh_total": 256.0,
+    "usable_capacity_wh": "UNKNOWN - requires discharge test (Charge_Tests sheet); 204.8 Wh assumed above",
+    "bms_safety_cutoff_v": "UNKNOWN - BMS datasheet needed",
+    "status": "REPORTED (second report), NOT VERIFIED",
+    "correction_note": "First report (v1) stated 2 x 12 V 120 Ah = 2880 Wh; corrected to 2 x 12.8 V 10 Ah = 256 Wh. The '10 A' figure in the first report most likely referred to the 10 Ah rating."
+  },
+  "policy": {
+    "reserve_fraction_suggested": 0.1,
+    "reserve_fraction_status": "suggested by hardware team, NOT approved",
+    "usable_fraction_assumed": 0.8,
+    "sol_limit_min": 120
+  },
+  "not_modelled": {
+    "turning": "Physical turn time/energy not measured; simulator assumes zero. Simulated-rover values are simulation settings and are not used.",
+    "speed_settings_2_3": "not measured; setting 1 will be used for the demonstration",
+    "loaded_vs_unloaded_power": "not measured; simulator uses one travel power",
+    "idle_power": "not measured; simulator assumes 0 while unloading/charging",
+    "battery_telemetry": "Rover sensors can report voltage and current (hardware team). How readings reach the scheduling software is NOT yet defined; no telemetry integration exists."
+  }
+}

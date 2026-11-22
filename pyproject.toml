@@ -25,3 +25,6 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-p no:anyio"
 pythonpath = ["tools"]
+
+[tool.setuptools.package-data]
+"rover_twin.mission.scheduler" = ["*.json", "*.patch", "*.md"]

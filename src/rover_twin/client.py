@@ -84,6 +84,14 @@ class TwinClient:
         of (x, y) points, None where no route exists."""
         return self._post("/route_costs", {"points": [{"x": float(x), "y": float(y)} for x, y in points]})
 
+    def plan_mission(self, start, jobs: list[dict], **options) -> dict:
+        """Schedule ``jobs`` ({"id", "x", "y", "material_kg", "task_min"}, optional
+        "excavation_power_w" and "yaw_deg") from ``start`` (x, y, yaw_deg) with
+        the students' scheduler on the twin's routes, and plan every leg.
+        ``options``: base, rover, sol_limit_min, state, turn_s_per_90deg,
+        algorithm, seed, rehearse (docs/twin-api.md)."""
+        return self._post("/plan_mission", {"start_pose": _pose(start), "jobs": jobs, **options})
+
     def forward(self, metres: float, speed: int = 30) -> dict:
         return {"command": "FWD", "speed": speed, "distance": round(metres * self.rover["distance_units_per_m"])}
 

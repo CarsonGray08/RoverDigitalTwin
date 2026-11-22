@@ -141,6 +141,51 @@ no route exists), and `blocked`: per point, null or why the rover cannot
 stand there. `turn_deg` counts only the corners: turning to leave along the
 first leg or to a heading on arrival depends on the legs either side.
 
+### `POST /plan_mission` (team1 branch)
+
+Schedules excavation jobs with Team 1's scheduler on the twin's routes, then
+plans and rehearses every leg. The scheduler is vendored in
+`src/rover_twin/mission/scheduler/` (see its `VENDORED.md`).
+
+```json
+{"start_pose": {"x": 0.0, "y": 0.0, "yaw_deg": 0.0},
+ "jobs": [{"id": "A", "x": 2.4, "y": 0.0, "material_kg": 4, "task_min": 4},
+          {"id": "B", "x": 0.0, "y": 1.2, "material_kg": 3, "task_min": 3, "yaw_deg": 90}],
+ "sol_limit_min": 25, "algorithm": "simulated_annealing", "seed": 0}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `jobs` | required | 1 to 30 jobs: `id`, `x`, `y`, `material_kg`, `task_min`; optional `excavation_power_w`, and `yaw_deg` to arrive facing |
+| `base` | the start pose | `{"x", "y"}` where cargo is unloaded and the battery charged |
+| `rover` | calibration v2 | Overrides of the scheduler's rover parameters (`speed_m_per_min`, `capacity_kg`, `battery_wh`, ...) |
+| `sol_limit_min` | 120 (calibration policy) | Mission time limit; `null` for none |
+| `state` | a fresh start | Replanning mid-way: `battery_wh`, `elapsed_min`, `load_kg`, `delivered_kg` |
+| `turn_s_per_90deg` | 40 (assumed) | Turn rate for leg times |
+| `algorithm`, `seed` | `simulated_annealing`, 0 | Or `genetic_algorithm`, `baseline` |
+| `rehearse` | true | Rehearse each leg, or only plan it |
+
+The twin's route costs become each leg's time: route length at the rover's
+speed, plus the turning at its corners and an average 90° to set off along
+it, at `turn_s_per_90deg`. The scheduler orders the jobs on those times; the
+twin then plans each leg from where the last ended. If it refuses a leg,
+that leg is taken out and the jobs are scheduled again (up to 3 times).
+
+| Field | Meaning |
+|---|---|
+| `approved`, `reason` | Every leg of the chosen schedule planned (and rehearsed) |
+| `order`, `route` | Jobs in the order done; every stop, `BASE` included (`START` first when replanning away from base) |
+| `legs` | Per leg: `from`, `to`, `time_min` (scheduled), and the `/plan_route` answer (`plans`, `rehearsals`, ...) |
+| `jobs` | Per job: `status` (`delivered`, `skipped_infeasible`), `reasons`, and `unreachable` with the twin's reason when no route reaches it |
+| `objective_kg`, `total_time_min`, `total_distance_m`, `battery_remaining_wh`, `events` | The scheduler's result |
+| `refused_legs` | Legs the twin refused, scheduled around |
+| `assumptions` | The rover values, speed and turn rate used |
+
+Refusals: `base_blocked`, `start_blocked`, `no_route_home`, `leg_refused`
+(after the retries). A rover or job the scheduler rejects returns 400 naming
+the field. The scheduler runs outside the simulation loop; only route costs
+and each leg's rehearsal queue in it.
+
 ### `GET /observation`
 
 Returns `live_pose` (null offline/before tracking), `rover_pose`,

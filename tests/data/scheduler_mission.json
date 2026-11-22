@@ -1,0 +1,97 @@
+{
+  "_meta": {
+    "specification_status": "synthetic",
+    "note": "All rover and job values are hypothetical sample values for algorithm development. They are NOT measured X-RASSOR specifications. Replace via config only; see README section 9.",
+    "source": "Phase 1 eight-job dummy dataset"
+  },
+  "description": "Invented eight-job dataset. Watts are power, Wh are energy. sol_limit_min is the fixed mission duration (scaled lunar sol); null = no limit.",
+  "sol_limit_min": 120,
+  "base": {
+    "x_m": 0,
+    "y_m": 0
+  },
+  "rover": {
+    "battery_capacity_wh": 100,
+    "battery_wh": 100,
+    "reserve_wh": 15,
+    "capacity_kg": 10,
+    "speed_m_per_min": 5,
+    "travel_power_w": 60,
+    "unload_min": 2,
+    "charging_power_w": 100
+  },
+  "tasks": [
+    {
+      "id": "A",
+      "job_type": "Heavy",
+      "x_m": 30,
+      "y_m": 0,
+      "material_kg": 9,
+      "task_min": 9,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "B",
+      "job_type": "Light",
+      "x_m": 6,
+      "y_m": 8,
+      "material_kg": 2,
+      "task_min": 2,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "C",
+      "job_type": "Heavy",
+      "x_m": 0,
+      "y_m": 25,
+      "material_kg": 8,
+      "task_min": 8,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "D",
+      "job_type": "Medium",
+      "x_m": 9,
+      "y_m": 12,
+      "material_kg": 5,
+      "task_min": 5,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "E",
+      "job_type": "Light",
+      "x_m": -8,
+      "y_m": 6,
+      "material_kg": 3,
+      "task_min": 3,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "F",
+      "job_type": "Medium",
+      "x_m": -20,
+      "y_m": 15,
+      "material_kg": 6,
+      "task_min": 6,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "G",
+      "job_type": "Heavy",
+      "x_m": -30,
+      "y_m": -10,
+      "material_kg": 10,
+      "task_min": 10,
+      "excavation_power_w": 120
+    },
+    {
+      "id": "H",
+      "job_type": "Medium",
+      "x_m": 15,
+      "y_m": -20,
+      "material_kg": 4,
+      "task_min": 4,
+      "excavation_power_w": 120
+    }
+  ]
+}

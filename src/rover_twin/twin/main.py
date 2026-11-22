@@ -29,6 +29,8 @@ from rover_twin import config
 from rover_twin.link.client import LinkClient, Update
 from rover_twin.link.messages import LivePose
 from rover_twin.metrics.latency import Stopwatch
+from rover_twin.mission import planner
+from rover_twin.mission.scheduler.scheduler_core import MissionError
 from rover_twin.twin import route
 from rover_twin.twin.terrain import StageTerrain, TerrainMap
 from rover_twin.twin.validation import Request, Result, SimRover, Validator
@@ -182,6 +184,24 @@ class Twin:
             out["reason"] = found.reason + ", rehearsed"
         return out
 
+    def plan_mission(self, request: planner.MissionRequest) -> tuple[int, dict]:
+        """From an HTTP thread: the students' scheduler runs here, outside the
+        loop, so it never holds up the live view; route costs and each leg's
+        rehearsal queue in the loop like any request."""
+        def ask(kind, payload):
+            status, answer = self.submit(kind, payload)
+            if status != 200:
+                raise RuntimeError(answer.get("reason"))
+            return answer
+
+        try:
+            return 200, planner.plan_mission(request, lambda points: ask("route_costs", points),
+                                             lambda leg: ask("route", leg), self.cfg.limits.goal_tolerance_m)
+        except MissionError as exc:
+            return 400, {"error": "schema_error", "reason": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one bad mission must not stop the twin
+            return 500, {"error": "twin_error", "reason": repr(exc)}
+
     def rover_info(self) -> dict:
         """What a client needs to write commands and size a footprint."""
         rc, lim = self.cfg.rover, self.cfg.limits
@@ -226,8 +246,8 @@ class _Drawn:
 
 def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
     """``GET /health`` (with the rover's units and limits), ``GET /observation``,
-    ``GET /map``, ``POST /validate_plan``, ``POST /plan_route`` and
-    ``POST /route_costs``. docs/twin-api.md is the contract.
+    ``GET /map``, ``POST /validate_plan``, ``POST /plan_route``, ``POST /route_costs``
+    and ``POST /plan_mission``. docs/twin-api.md is the contract.
     ``GET /view.jpg`` is the operator's view, its age (s) in ``X-Age-S``."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -250,7 +270,8 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
         def do_POST(self) -> None:
             parse = {"/validate_plan": ("validate", Request.from_dict),
                      "/plan_route": ("route", route.RouteRequest.from_dict),
-                     "/route_costs": ("route_costs", _points)}.get(self.path)
+                     "/route_costs": ("route_costs", _points),
+                     "/plan_mission": ("mission", planner.MissionRequest.from_dict)}.get(self.path)
             if parse is None:
                 self._reply(404, {"error": "not_found"})
                 return
@@ -260,7 +281,7 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
             except (ValueError, KeyError, TypeError) as exc:
                 self._reply(400, {"error": "schema_error", "reason": str(exc)})
                 return
-            self._reply(*twin.submit(parse[0], request))
+            self._reply(*(twin.plan_mission(request) if parse[0] == "mission" else twin.submit(parse[0], request)))
 
         def _reply(self, status: int, payload: dict) -> None:
             self._send(status, json.dumps(payload).encode(), "application/json")
