@@ -43,6 +43,13 @@ To run a plan (`{"commands": [...], "goal": {...}}`; goal optional):
 .venv/bin/python -m rover_twin.ops.drive plan.json --arm --rover-ip 192.168.0.157   # drive
 ```
 
+To drive to a point instead, let the twin plan a safe route there:
+
+```bash
+.venv/bin/python -m rover_twin.ops.drive --to 1.0 -0.8                              # plan and rehearse from live pose
+.venv/bin/python -m rover_twin.ops.drive --to 1.0 -0.8 90 --arm --rover-ip 192.168.0.157
+```
+
 See [the API reference](twin-api.md) for command units, limits and refusal results.
 The driver rehearses the remaining plan before each command and stops on a
 refusal, stale/lost pose, controller fault, completion or Ctrl-C.

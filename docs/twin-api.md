@@ -88,6 +88,59 @@ Simulated speed at 30 is about 0.19 m/s and 19.5°/s. The real rover is
 slower (~0.035 m/s at level 1). Fit real duration models from drive logs,
 not `duration_s`.
 
+### `POST /plan_route`
+
+Plans a safe route to a goal and rehearses it. Send coordinates; the twin
+finds the way and writes the commands.
+
+```json
+{"start_pose": {"x": 0.0, "y": 0.0, "yaw_deg": 0.0},
+ "goal": {"x": 2.4, "y": 0.0, "yaw_deg": 90.0},
+ "speed": 30, "rehearse": true}
+```
+
+`goal.yaw_deg` is optional (omitted: arrive facing along the last straight);
+`speed` (simulated, default `route.speed`) and `rehearse` (default true) too.
+
+A route keeps the rover's centre where it could turn on the spot without
+its footprint coming within `route.clearance_m` (0.10 m) of an obstacle, on
+known ground at every heading, inside the lab bounds. That is the footprint's
+half diagonal (0.40 m) plus the clearance on every side, so gaps narrower
+than about 1 m are treated as closed. The shortest such path is cut to
+straight legs; each corner is a turn, each straight one or more `FWD` of at
+most `max_distance_units`, grouped into plans of at most `max_commands`. The
+twin then rehearses the plans in order, each from where the last ended.
+
+| Field | Meaning |
+|---|---|
+| `approved`, `reason` | Route found and, when rehearsed, every plan approved |
+| `rehearsed` | Whether the plans were rehearsed |
+| `waypoints` | Start, corners, goal: `{"x", "y"}` |
+| `length_m`, `turn_deg` | Route length and total turning, including to the goal heading |
+| `plans` | `{"commands": [...], "goal": {...}}` per plan, ready for `/validate_plan` or `ops.drive` |
+| `rehearsals` | Per plan rehearsed: `approved`, `reason`, `duration_s`, `final_pose`, `min_clearance_m`, and on refusal `failure_type`, `failed_command_index` |
+| `failure_type`, `failed_plan_index` | On refusal; index is null when no route was found |
+
+Failure types, besides those of `/validate_plan` from a rehearsal:
+`start_blocked`, `goal_blocked` (the reason says why: an obstacle within
+reach, ground not observed, outside the lab bounds or the mapped area),
+`no_route`, `unknown_not_ready` (nothing mapped) and `speed_limit`.
+
+### `POST /route_costs`
+
+Route length and corner turning between every ordered pair of up to 32
+points, on the same routes `/plan_route` plans, without commands or
+rehearsal: what a scheduler needs to cost its legs.
+
+```json
+{"points": [{"x": 0.0, "y": 0.0}, {"x": 2.4, "y": 0.0}, {"x": 0.0, "y": 1.0}]}
+```
+
+Returns `length_m` and `turn_deg`, matrices indexed `[from][to]` (null where
+no route exists), and `blocked`: per point, null or why the rover cannot
+stand there. `turn_deg` counts only the corners: turning to leave along the
+first leg or to a heading on arrival depends on the legs either side.
+
 ### `GET /observation`
 
 Returns `live_pose` (null offline/before tracking), `rover_pose`,
@@ -102,8 +155,8 @@ The lab twin's 3D view as a JPEG (the dashboard shows it), captured at
 the `X-Age-S` header. Returns 404 JSON when the view is off, not yet captured,
 or on the offline twin.
 
-`/map` and `/validate_plan` queue in the simulation loop; the map stays fixed
-during a rehearsal. `/health`, `/observation` and `/view.jpg` answer without waiting for it.
+`/map`, `/validate_plan`, `/plan_route` and `/route_costs` queue in the
+simulation loop; the map stays fixed during a rehearsal and a route's rehearsals. `/health`, `/observation` and `/view.jpg` answer without waiting for it.
 
 ## Python and real execution
 
@@ -121,7 +174,21 @@ if not result["approved"]:
 Client helpers: `forward`/`reverse` take metres, `left`/`right` degrees, with
 optional `speed` (default 30). `rehearse(start, commands, goal=None)` takes
 pose tuples `(x, y, yaw_deg)`; its default goal is the nominal plan endpoint.
-`observation()` reads live state.
+`plan_route(start, goal)` takes a goal `(x, y)` or `(x, y, yaw_deg)`;
+`route_costs(points)` a list of `(x, y)`. `observation()` reads live state.
+
+```python
+route = twin.plan_route((0.0, 0.0, 0.0), (2.4, 0.0))
+if route["approved"]:
+    print(route["length_m"], [p["goal"] for p in route["plans"]])
+legs = twin.route_costs([(0.0, 0.0), (2.4, 0.0), (0.0, 1.0)])["length_m"]
+```
+
+To drive to a goal, `python -m rover_twin.ops.drive --to X Y [YAW_DEG]`
+plans and rehearses the route (offline: add `--start X Y YAW_DEG`). Armed
+(`--arm --rover-ip IP`), it flies the route's first plan, then plans again
+from the live pose, until the rover is within the goal tolerance; a route
+the twin refuses stops it before anything moves.
 
 To fly a plan, save `{"commands": [...], "goal": {...}}` (goal optional)
 and use `python -m rover_twin.ops.drive plan.json`. It rehearses only unless

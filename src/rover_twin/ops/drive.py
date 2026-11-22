@@ -3,6 +3,8 @@
     python -m rover_twin.ops.drive plan.json                      # rehearse from the live pose
     python -m rover_twin.ops.drive plan.json --start 0 0 0        # rehearse from a pose (offline twin)
     python -m rover_twin.ops.drive plan.json --arm --rover-ip 192.168.0.157
+    python -m rover_twin.ops.drive --to 2.0 -1.0 [90] --start 0 0 0   # plan a route to a goal and rehearse it
+    python -m rover_twin.ops.drive --to 2.0 -1.0 [90] --arm --rover-ip 192.168.0.157
 
 ``plan.json`` is ``{"commands": [...], "goal": {...}, "rehearse": true}`` in
 the twin's schema (docs/twin-api.md); without a goal it is where the rest of the commands end
@@ -22,6 +24,12 @@ rehearsed. A plan with ``"rehearse": false`` is flown without asking the twin
 (the dashboard's 360 scan, turns in place the twin cannot judge well); the
 live pose still stops every command. While the mapper is connected but has
 not sent a live pose yet (a scan just starting), the drive waits for one.
+
+With ``--to X Y [YAW_DEG]`` the twin plans the route (``POST /plan_route``):
+around obstacles, over known ground, rehearsed. Armed, the rover flies the
+route's first plan, then the twin plans again from the live pose, and so on
+until the rover is within the goal tolerance, so drift and a map that changed
+on the way are planned around rather than refused.
 
 Each command flown is logged to ``--log`` (JSON lines): start and end pose,
 how long it really took, and how long the twin predicted.
@@ -51,6 +59,7 @@ STALL_S = 3.0                         # no progress for this long after that: st
 TIMEOUT_S = 120.0                     # one command, however slow the rover
 SETTLE_S = 0.5                        # after STOP, before the next live pose
 POSE_WAIT_S = 15.0                    # for the first live pose of a scan just starting
+MAX_ROUTE_PLANS = 20                  # of one --to drive, replanning after each
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,31 @@ class Driver:
             return Outcome(True, "plan flown", len(commands))
         finally:
             self.rover.stop()
+
+    def go_to(self, goal, max_plans: int = MAX_ROUTE_PLANS) -> Outcome:
+        """Drive to ``goal``, (x, y) or (x, y, yaw_deg), on routes the twin
+        plans: fly the first plan of a route from the live pose, then plan
+        again from where the rover is, until it is within the goal tolerance."""
+        tol_m, tol_deg = self.twin.rover["goal_tolerance"]
+        done = 0
+        for _ in range(max_plans):
+            pose = self.pose()
+            if _arrived(pose, goal, tol_m, tol_deg):
+                return Outcome(True, "arrived", done)
+            route = self.twin.plan_route(pose, goal)
+            if not route["approved"]:
+                return Outcome(False, f"the twin refused a route from ({pose[0]:.2f}, {pose[1]:.2f}): "
+                                      f"{route.get('failure_type')}: {route['reason']}", done)
+            if not route["plans"]:
+                return Outcome(True, "arrived", done)
+            plan = route["plans"][0]
+            print(f"route: {route['reason']}; flying plan 1 of {len(route['plans'])}")
+            g = plan["goal"]
+            outcome = self.run(plan["commands"], (g["x"], g["y"], g["yaw_deg"]))
+            done += outcome.commands_done
+            if not outcome.completed:
+                return Outcome(False, outcome.reason, done)
+        return Outcome(False, f"not within the goal tolerance after {max_plans} plans", done)
 
     def _fly(self, command: dict, start) -> tuple[str, tuple, float]:
         """Send one command and stop it when the live pose has done it:
@@ -157,6 +191,12 @@ def wait_for_pose(twin: TwinClient, timeout_s: float = POSE_WAIT_S, poll_s: floa
         time.sleep(poll_s)
 
 
+def _arrived(pose, goal, tol_m: float, tol_deg: float) -> bool:
+    if math.hypot(pose[0] - goal[0], pose[1] - goal[1]) > tol_m:
+        return False
+    return len(goal) < 3 or abs(wrap_deg(pose[2] - goal[2])) <= tol_deg
+
+
 def _along(kind: str, start, now) -> float:
     """How far a drive has gone along its start heading, in its direction."""
     yaw = math.radians(start[2])
@@ -172,7 +212,9 @@ def _turned(kind: str, last, now) -> float:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("plan", type=Path)
+    parser.add_argument("plan", type=Path, nargs="?", help="a plan file; or give --to")
+    parser.add_argument("--to", type=float, nargs="+", metavar="X Y [YAW_DEG]",
+                        help="drive to this goal on a route the twin plans")
     parser.add_argument("--twin", default="http://127.0.0.1:8765")
     parser.add_argument("--rover-ip", default="")
     parser.add_argument("--rover-name", default="", help="the rover's ROVER_NAME, if it sets one")
@@ -185,15 +227,31 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.arm and args.start:
         parser.error("--start is for rehearsing: an armed drive starts where the rover is")
-    plan = json.loads(args.plan.read_text())
-    goal = plan.get("goal")
-    goal = (goal["x"], goal["y"], goal["yaw_deg"]) if goal else None
-    rehearse = plan.get("rehearse", True)
+    if (args.plan is None) == (args.to is None):
+        parser.error("give either a plan file or --to X Y [YAW_DEG]")
+    if args.to is not None and len(args.to) not in (2, 3):
+        parser.error("--to takes X Y or X Y YAW_DEG")
+    if args.arm and not args.rover_ip:
+        parser.error("--arm needs --rover-ip")
     twin = TwinClient(args.twin)
     try:
         start = tuple(args.start) if args.start else wait_for_pose(twin)
     except RuntimeError as exc:
         raise SystemExit(f"{exc} (rehearsing on the offline twin? pass --start X Y YAW_DEG)")
+    if args.to is not None:
+        if not args.arm:
+            route = twin.plan_route(start, tuple(args.to))
+            print(json.dumps({k: route.get(k) for k in ("approved", "reason", "failure_type", "length_m",
+                                                          "turn_deg", "waypoints")}, indent=1))
+            print(f"{len(route['plans'])} plans; not armed: nothing was sent to the rover")
+            return
+        outcome = Driver(twin, Rover(args.rover_ip, args.level, name=args.rover_name), args.log).go_to(tuple(args.to))
+        print(("done: " if outcome.completed else "stopped: ") + outcome.reason)
+        return
+    plan = json.loads(args.plan.read_text())
+    goal = plan.get("goal")
+    goal = (goal["x"], goal["y"], goal["yaw_deg"]) if goal else None
+    rehearse = plan.get("rehearse", True)
     if not args.arm and not rehearse:
         print("not armed and not rehearsed: nothing was sent to the rover")
         return
@@ -204,8 +262,6 @@ def main(argv: list[str] | None = None) -> None:
         print("not armed: nothing was sent to the rover" if result["approved"] else
               f"not armed, and the twin refused it: {result.get('failure_type')}: {result['reason']}")
         return
-    if not args.rover_ip:
-        parser.error("--arm needs --rover-ip")
     rover = Rover(args.rover_ip, args.level, name=args.rover_name)
     outcome = Driver(twin, rover, args.log).run(plan["commands"], goal, rehearse=rehearse)
     print(("done: " if outcome.completed else "stopped: ") + outcome.reason)

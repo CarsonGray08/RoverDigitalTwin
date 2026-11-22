@@ -73,6 +73,21 @@ class Limits:
 
 
 @dataclass(frozen=True)
+class Route:
+    """Route planning to a goal (twin/route.py). A route keeps the rover's
+    turning circle (the footprint's half diagonal) this clear of obstacles at
+    every point, so it can turn anywhere along it, and keeps it on known ground."""
+
+    clearance_m: float = 0.10            # beyond the turning circle: room for the real rover's drift
+    cell_m: float = 0.04                 # planning grid, a whole number of map cells
+    speed: int = 30                      # simulated speed of the commands a route is given as
+
+    def __post_init__(self) -> None:
+        if self.clearance_m < 0 or self.cell_m <= 0:
+            raise ValueError("route clearance_m must be at least 0 and cell_m positive")
+
+
+@dataclass(frozen=True)
 class Start:
     """Rover pose in the twin when the map is anchored."""
 
@@ -188,6 +203,7 @@ class Config:
     mount: Mount = field(default_factory=Mount)
     rover: Rover = field(default_factory=Rover)
     limits: Limits = field(default_factory=Limits)
+    route: Route = field(default_factory=Route)
     start: Start = field(default_factory=Start)
     alignment: Alignment = field(default_factory=Alignment)
     odometry: Odometry = field(default_factory=Odometry)
