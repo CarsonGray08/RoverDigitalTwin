@@ -65,11 +65,24 @@ class TwinClient:
         map. ``goal`` defaults to where the commands would end on flat ground,
         so ``approved`` means: no collision, no unknown terrain, and it got there."""
         goal = goal if goal is not None else self.nominal_end(start, commands)
-        body = {"start_pose": _pose(start), "goal": _pose(goal), "commands": commands}
-        request = urllib.request.Request(self.url + "/validate_plan", json.dumps(body).encode(),
-                                         {"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-            return json.loads(response.read())
+        return self._post("/validate_plan", {"start_pose": _pose(start), "goal": _pose(goal), "commands": commands})
+
+    def plan_route(self, start, goal, speed: int | None = None, rehearse: bool = True) -> dict:
+        """A safe route from ``start`` (x, y, yaw_deg) to ``goal``, (x, y) or
+        (x, y, yaw_deg), around obstacles and over known ground, as plans the
+        twin has rehearsed one after another. ``approved`` means every plan passed."""
+        x, y, *yaw = goal
+        body = {"start_pose": _pose(start), "goal": {"x": float(x), "y": float(y)}, "rehearse": rehearse}
+        if yaw:
+            body["goal"]["yaw_deg"] = float(yaw[0])
+        if speed is not None:
+            body["speed"] = speed
+        return self._post("/plan_route", body)
+
+    def route_costs(self, points) -> dict:
+        """Route length (m) and corner turning (deg) between every ordered pair
+        of (x, y) points, None where no route exists."""
+        return self._post("/route_costs", {"points": [{"x": float(x), "y": float(y)} for x, y in points]})
 
     def forward(self, metres: float, speed: int = 30) -> dict:
         return {"command": "FWD", "speed": speed, "distance": round(metres * self.rover["distance_units_per_m"])}
@@ -92,6 +105,12 @@ class TwinClient:
             elif c["command"] in ("LEFT", "RIGHT"):
                 yaw += c["distance"] if c["command"] == "LEFT" else -c["distance"]
         return x, y, (yaw + 180.0) % 360.0 - 180.0
+
+    def _post(self, path: str, body: dict) -> dict:
+        request = urllib.request.Request(self.url + path, json.dumps(body).encode(),
+                                         {"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+            return json.loads(response.read())
 
     def _get(self, path: str, timeout_s: float | None = None) -> dict:
         with urllib.request.urlopen(self.url + path, timeout=timeout_s or self.timeout_s) as response:

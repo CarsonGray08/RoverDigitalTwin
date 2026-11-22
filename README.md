@@ -28,6 +28,7 @@ from rover_twin.client import TwinClient
 twin = TwinClient("http://127.0.0.1:8765")
 grid = twin.map()
 result = twin.rehearse((0.0, 0.0, 0.0), [twin.forward(1.0), twin.left(90)])
+route = twin.plan_route((0.0, 0.0, 0.0), (1.0, -0.8))   # the twin finds a safe way there
 ```
 
 ## Lab use

@@ -29,8 +29,9 @@ from rover_twin import config
 from rover_twin.link.client import LinkClient, Update
 from rover_twin.link.messages import LivePose
 from rover_twin.metrics.latency import Stopwatch
+from rover_twin.twin import route
 from rover_twin.twin.terrain import StageTerrain, TerrainMap
-from rover_twin.twin.validation import Request, SimRover, Validator
+from rover_twin.twin.validation import Request, Result, SimRover, Validator
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "config" / "rover_twin.toml"
 STALL_S = 0.05      # a loop iteration slower than this is a stall
@@ -122,24 +123,64 @@ class Twin:
 
     def _serve(self, kind: str, payload, reply: queue.Queue) -> None:
         try:
-            if kind == "validate":
-                if self._terrain_changed:
-                    t0 = self.clock()
-                    self.rover.reload()
-                    self.watch.took("physics_reload", self.clock() - t0)
-                    self._terrain_changed = False
-                start = self.clock()
-                result = self.validator.validate(payload)
-                wall = self.clock() - start
-                self.watch.took("validation", wall)
-                self._speedups.append(result.duration_s / max(wall, 1e-9))
-                if self.live is not None:          # the sim rover goes back to the real one
-                    self.rover.follow(self.live.pose, self.live.z_m + self.rover.ride_height_m)
-                reply.put((200, result.to_dict()))
+            if kind in ("validate", "route"):
+                answer = self._rehearse(payload).to_dict() if kind == "validate" else self._route(payload)
+                self._return_to_live()
+                reply.put((200, answer))
+            elif kind == "route_costs":
+                reply.put((200, route.costs(route.free_space(self.map, self.cfg), payload)))
             else:
                 reply.put((200, self.map.dense(self.cfg.rover.max_step_m)))
         except Exception as exc:  # noqa: BLE001 - one bad job must not stop the twin
             reply.put((500, {"error": "twin_error", "reason": repr(exc)}))
+
+    def _rehearse(self, request: Request) -> Result:
+        if self._terrain_changed:
+            t0 = self.clock()
+            self.rover.reload()
+            self.watch.took("physics_reload", self.clock() - t0)
+            self._terrain_changed = False
+        start = self.clock()
+        result = self.validator.validate(request)
+        wall = self.clock() - start
+        self.watch.took("validation", wall)
+        self._speedups.append(result.duration_s / max(wall, 1e-9))
+        return result
+
+    def _return_to_live(self) -> None:
+        if self.live is not None:          # the sim rover goes back to the real one
+            self.rover.follow(self.live.pose, self.live.z_m + self.rover.ride_height_m)
+
+    def _route(self, request: route.RouteRequest) -> dict:
+        """Plan a route to the goal, then rehearse its plans one after another,
+        each from where the last one ended. docs/twin-api.md is the format."""
+        t0 = self.clock()
+        found = route.plan(route.free_space(self.map, self.cfg), self.cfg, request)
+        self.watch.took("route_planning", self.clock() - t0)
+        out = {"approved": found.found, "reason": found.reason, "rehearsed": False,
+               "waypoints": [{"x": round(x, 4), "y": round(y, 4)} for x, y in found.waypoints],
+               "length_m": round(found.length_m, 3), "turn_deg": found.turn_deg,
+               "plans": list(found.plans), "rehearsals": []}
+        if not found.found:
+            out.update(failure_type=found.failure_type, failed_plan_index=None)
+            return out
+        if not request.rehearse:
+            return out
+        start = request.start
+        for index, p in enumerate(found.plans):
+            result = self._rehearse(Request.from_dict({"start_pose": _pose_dict(start), **p}))
+            d = result.to_dict()
+            out["rehearsals"].append({k: d[k] for k in ("approved", "reason", "failure_type", "failed_command_index",
+                                                        "duration_s", "final_pose", "min_clearance_m") if k in d})
+            if not result.approved:
+                out.update(approved=False, failure_type=result.failure_type, failed_plan_index=index,
+                           reason=f"plan {index}: {result.reason}")
+                break
+            start = result.final_pose
+        out["rehearsed"] = True
+        if out["approved"]:
+            out["reason"] = found.reason + ", rehearsed"
+        return out
 
     def rover_info(self) -> dict:
         """What a client needs to write commands and size a footprint."""
@@ -164,6 +205,10 @@ class Twin:
         }
 
 
+def _pose_dict(p) -> dict:
+    return {"x": p.x, "y": p.y, "yaw_deg": p.yaw_deg}
+
+
 class _Drawn:
     """The sim rover as validation drives it: each physics step also draws the
     operator's view when a frame is due, so the rehearsal is seen as it runs."""
@@ -181,7 +226,8 @@ class _Drawn:
 
 def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
     """``GET /health`` (with the rover's units and limits), ``GET /observation``,
-    ``GET /map`` and ``POST /validate_plan``. docs/twin-api.md is the contract.
+    ``GET /map``, ``POST /validate_plan``, ``POST /plan_route`` and
+    ``POST /route_costs``. docs/twin-api.md is the contract.
     ``GET /view.jpg`` is the operator's view, its age (s) in ``X-Age-S``."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -202,16 +248,19 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
                 self._reply(404, {"error": "not_found"})
 
         def do_POST(self) -> None:
-            if self.path != "/validate_plan":
+            parse = {"/validate_plan": ("validate", Request.from_dict),
+                     "/plan_route": ("route", route.RouteRequest.from_dict),
+                     "/route_costs": ("route_costs", _points)}.get(self.path)
+            if parse is None:
                 self._reply(404, {"error": "not_found"})
                 return
             try:
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                request = Request.from_dict(json.loads(body))
+                request = parse[1](json.loads(body))
             except (ValueError, KeyError, TypeError) as exc:
                 self._reply(400, {"error": "schema_error", "reason": str(exc)})
                 return
-            self._reply(*twin.submit("validate", request))
+            self._reply(*twin.submit(parse[0], request))
 
         def _reply(self, status: int, payload: dict) -> None:
             self._send(status, json.dumps(payload).encode(), "application/json")
@@ -231,6 +280,14 @@ def serve(twin: Twin, host: str, port: int) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=server.serve_forever, name="twin-http", daemon=True).start()
     return server
+
+
+def _points(data: dict) -> list[tuple[float, float]]:
+    """``/route_costs``'s body: ``{"points": [{"x": .., "y": ..}, ...]}``."""
+    points = [(route._number(p["x"]), route._number(p["y"])) for p in data["points"]]
+    if not 1 <= len(points) <= route.MAX_POINTS:
+        raise ValueError(f"points must hold 1 to {route.MAX_POINTS} points, got {len(points)}")
+    return points
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -58,13 +58,12 @@ class TerrainMap:
             states[rows] = patch.state[local[rows, 0], local[rows, 1]]
         return heights, states
 
-    def dense(self, max_step: float) -> dict:
-        """The whole map as one grid, for software that plans on it: cell
-        [i][j] covers x0 + i*cell .. x0 + (i+1)*cell (and the same in y);
-        height is None where unknown; obstacle marks what validation refuses."""
+    def grid(self, max_step: float):
+        """The whole map as arrays: ``(origin_m, height, state, obstacle)``,
+        cell [i, j] covering x0 + i*cell .. x0 + (i+1)*cell (and the same in y).
+        None when nothing has been mapped."""
         if not self.patches:
-            return {"cell_m": self.cell_m, "origin_m": [0.0, 0.0], "shape": [0, 0],
-                    "height_m": [], "state": [], "obstacle": []}
+            return None
         keys = np.array(list(self.patches))
         lo, hi = keys.min(axis=0) * self.n, (keys.max(axis=0) + 1) * self.n
         height = np.full(hi - lo, np.nan)
@@ -73,8 +72,18 @@ class TerrainMap:
             i, j = tx * self.n - lo[0], ty * self.n - lo[1]
             height[i:i + self.n, j:j + self.n] = p.height[:-1, :-1]
             state[i:i + self.n, j:j + self.n] = p.state[:-1, :-1]
-        obstacle = _obstacle(height, state, max_step)
-        return {"cell_m": self.cell_m, "origin_m": (lo * self.cell_m).tolist(), "shape": list(height.shape),
+        return (lo * self.cell_m).astype(float), height, state, _obstacle(height, state, max_step)
+
+    def dense(self, max_step: float) -> dict:
+        """The whole map as one grid, for software that plans on it: cell
+        [i][j] covers x0 + i*cell .. x0 + (i+1)*cell (and the same in y);
+        height is None where unknown; obstacle marks what validation refuses."""
+        grid = self.grid(max_step)
+        if grid is None:
+            return {"cell_m": self.cell_m, "origin_m": [0.0, 0.0], "shape": [0, 0],
+                    "height_m": [], "state": [], "obstacle": []}
+        origin, height, state, obstacle = grid
+        return {"cell_m": self.cell_m, "origin_m": origin.tolist(), "shape": list(height.shape),
                 "height_m": np.where(state == UNKNOWN, None, np.round(height, 4)).tolist(),
                 "state": state.tolist(), "obstacle": obstacle.astype(np.uint8).tolist()}
 
